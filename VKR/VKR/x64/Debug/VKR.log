@@ -1,0 +1,17 @@
+﻿  VKR.cpp
+C:\Users\Oleg\source\repos\VKR\VKR\VKR.h(915,71): warning C4267: аргумент: преобразование из "size_t" в "DWORD"; возможна потеря данных
+  (компиляция исходного файла "VKR.cpp")
+  
+C:\Users\Oleg\source\repos\VKR\VKR\VKR.h(949,61): warning C4267: аргумент: преобразование из "size_t" в "DWORD"; возможна потеря данных
+  (компиляция исходного файла "VKR.cpp")
+  
+C:\Users\Oleg\source\repos\VKR\VKR\VKR.h(1137,65): warning C4267: аргумент: преобразование из "size_t" в "DWORD"; возможна потеря данных
+  (компиляция исходного файла "VKR.cpp")
+  
+C:\Users\Oleg\source\repos\VKR\VKR\VKR.h(1147,29): warning C4244: инициализация: преобразование "ULONGLONG" в "DWORD", возможна потеря данных
+  (компиляция исходного файла "VKR.cpp")
+  
+  .NETFramework,Version=v4.7.2.AssemblyAttributes.cpp
+  Создание кода...
+  VKR.obj : обнаружен модуль MSIL; для MSIL последовательная компоновка отключена; выполняется полная компоновка
+  VKR.vcxproj -> C:\Users\Oleg\source\repos\VKR\x64\Debug\VKR.exe

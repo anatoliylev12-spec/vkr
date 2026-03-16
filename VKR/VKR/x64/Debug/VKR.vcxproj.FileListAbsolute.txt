@@ -1,0 +1,3 @@
+C:\Users\Oleg\source\repos\VKR\VKR\x64\Debug\VKR.vcxproj.AssemblyReference.cache
+C:\Users\Oleg\source\repos\VKR\VKR\x64\Debug\VKR.VKR.resources
+C:\Users\Oleg\source\repos\VKR\VKR\x64\Debug\VKR.vcxproj.GenerateResource.cache
