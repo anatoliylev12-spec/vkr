@@ -112,6 +112,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Table.h" />
     <ClInclude Include="VKR.h">
       <FileType>CppForm</FileType>
     </ClInclude>
