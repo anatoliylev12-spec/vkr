@@ -12,7 +12,7 @@
 #include <limits>
 #include <iostream>
 
-// Заголовок для маршалинга в C++/CLI
+// Заголовок для маршалинга в C++/CLR
 #include <msclr\marshal_cppstd.h>
 
 using namespace System;
@@ -50,7 +50,6 @@ private:
     System::Windows::Forms::Label^ labelSlaveID;
     System::Windows::Forms::Label^ labelFoundDevices;
     System::Windows::Forms::TextBox^ textBoxScanResult;
-    System::Windows::Forms::ProgressBar^ progressBar;
 
     // Элементы управления для регистров
     System::Windows::Forms::DataGridView^ dataGridViewRegisters;
@@ -79,11 +78,10 @@ private:
     // Константы
     const int MIN_SLAVE_ID = 1;
     const int MAX_SLAVE_ID = 20;
-    const int MAX_REGISTER_ADDRESS = 500;   // 500 16-битных регистров
-    const int BATCH_SIZE = 20;             // Максимум регистров за запрос
-    const int MAX_WAIT_TICKS = 10;           // 8 * 50мс = 400мс таймаут
+    const int FIRST_REGISTER_ADDRESS = 0;      // Начальный адрес для сканирования
+    const int TOTAL_32BIT_VALUES = 250;        // Количество 32-битных значений
 
-    // Хранилище данных регистров (КЛЮЧ = физический адрес)
+    // Хранилище данных регистров (КЛЮЧ = физический адрес 16-битного регистра)
     Dictionary<int, Tuple<float, int32_t>^>^ allRegistersData;
 
     // Данные для контролируемых параметров (фиксированные)
@@ -95,9 +93,24 @@ private:
     Dictionary<int, uint32_t>^ changedRegistersValues;
     Dictionary<int, float>^ changedRegistersFloats;
 
-    // Таймеры
-    System::Windows::Forms::Timer^ updateTimer;   // Для автообновления (4 сек)
-    System::Windows::Forms::Timer^ pollTimer;     // Для конечного автомата (50 мс)
+    // Таймер для автообновления
+ // Таймер для автообновления
+    System::Windows::Forms::Timer^ updateTimer;
+    System::Windows::Forms::Timer^ pollTimer;
+
+    enum class PollState
+    {
+        Idle,
+        SendBatch,
+        WaitBatch
+    };
+
+    PollState pollState;
+    int pollStartAddress;
+    int pollCurrentBatchSize;
+    DWORD pollBatchStartTick;
+    DWORD pollTotalBytesRead;
+    array<System::Byte>^ pollResponseBuffer;
 
     bool isAutoUpdating;
     bool isRegistersPanelExpanded;
@@ -109,26 +122,18 @@ private:
     bool isUpdatingTables;
     bool isPollingInProgress;
     System::Object^ portLock;
-    DWORD pollStartTime;
-
-    // Конечный автомат опроса
-    enum class PollState { IDLE, SEND, WAIT, NEXT, COMPLETE };
-    PollState currentState;
-    int currentAddress;
-    int currentBatchSize;
-    int waitCounter;
-    int totalRegistersRead;
-
-    // Буферы (статическое выделение)
-    array<unsigned char>^ readBuffer;
-    array<unsigned char>^ writeBuffer;
 
     System::ComponentModel::Container^ components;
 
     void InitializeComponent();
     void InitializeCustomComponent();
     void InitializeParameters();
-    void InitializeTimers();
+    void InitializeTimer();
+    void StartPollingCycle();
+    void SendPollBatch();
+    void ReadPollBatch();
+    void FinishPollingCycle();
+    void OnPollTimerTick(Object^ sender, EventArgs^ e);
     void RefreshPorts();
     void ConnectToPort();
     bool ConfigurePort();
@@ -138,36 +143,26 @@ private:
     bool CheckCRC(const uint8_t* response, size_t length);
     void ScanForDevices();
     void RefreshRegistersData();
+    void ScanAllRegisters();
     void WriteRegisters();
     void UpdateRegistersData();
     void UpdateFullRegistersTable();
     void UpdateParametersTable();
     void CollapseRegistersPanel();
     void ExpandRegistersPanel();
-    void UpdateProgress(int value);
     void LogMessage(System::String^ message);
     void LogMessage(const std::wstring& message);
     System::String^ StringToWString(const std::string& str);
-
-    // Обработчики таймеров
-    void OnUpdateTimerTick(Object^ sender, EventArgs^ e);
-    void OnPollTimerTick(Object^ sender, EventArgs^ e);
-
-    // Методы конечного автомата
-    void SendRequest();
-    void CheckResponse();
-    void MoveToNext();
-    void CompletePolling();
-
+    void OnTimerTick(Object^ sender, EventArgs^ e);
+    void AutoUpdateData();
     void MarkRegisterAsChanged(int registerAddress, uint32_t newValue, float newFloatValue);
     bool IsRegisterChanged(int registerAddress);
     void ClearChangedRegisters();
 
-    // Вспомогательные методы (быстрые преобразования)
-    float BytesToFloat(array<unsigned char>^ bytes, int offset);
-    void FloatToBytes(float value, array<unsigned char>^ buffer, int offset);
-    uint16_t BytesToUInt16(array<unsigned char>^ bytes, int offset);
-    void UInt16ToBytes(uint16_t value, array<unsigned char>^ buffer, int offset);
+    // Вспомогательные методы
+    float ConvertToFloat(uint32_t value);
+    int32_t ConvertToInt32(uint32_t value);
+    bool ReadLogicalReg32(int logicalReg, System::UInt32% rawValue, System::Int32% intValue, float% floatValue);
 
     // Обработчики событий
     void Form1_Load(System::Object^ sender, System::EventArgs^ e);
