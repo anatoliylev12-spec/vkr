@@ -50,6 +50,14 @@ private:
     System::Windows::Forms::Label^ labelSlaveID;
     System::Windows::Forms::Label^ labelFoundDevices;
     System::Windows::Forms::TextBox^ textBoxScanResult;
+    System::Windows::Forms::Label^ labelModelCaption;
+    System::Windows::Forms::Label^ labelModelValue;
+    System::Windows::Forms::Label^ labelSerialCaption;
+    System::Windows::Forms::Label^ labelSerialValue;
+    System::Windows::Forms::Label^ labelTypeCaption;
+    System::Windows::Forms::Label^ labelTypeValue;
+    System::Windows::Forms::Label^ labelSpeedCaption;
+    System::Windows::Forms::Label^ labelSpeedValue;
 
     // Элементы управления для регистров
     System::Windows::Forms::DataGridView^ dataGridViewRegisters;
@@ -79,10 +87,11 @@ private:
     const int MIN_SLAVE_ID = 1;
     const int MAX_SLAVE_ID = 20;
     const int FIRST_REGISTER_ADDRESS = 0;      // Начальный адрес для сканирования
-    const int TOTAL_32BIT_VALUES = 250;        // Количество 32-битных значений
+    const int TOTAL_32BIT_VALUES = 500;        // Количество 32-битных значений
 
     // Хранилище данных регистров (КЛЮЧ = физический адрес 16-битного регистра)
     Dictionary<int, Tuple<float, int32_t>^>^ allRegistersData;
+    Dictionary<int, System::UInt32>^ allRegistersRaw;
 
     // Данные для контролируемых параметров (фиксированные)
     List<String^>^ paramNames;
@@ -94,7 +103,24 @@ private:
     Dictionary<int, float>^ changedRegistersFloats;
 
     // Таймер для автообновления
+ // Таймер для автообновления
     System::Windows::Forms::Timer^ updateTimer;
+    System::Windows::Forms::Timer^ pollTimer;
+
+    enum class PollState
+    {
+        Idle,
+        SendBatch,
+        WaitBatch
+    };
+
+    PollState pollState;
+    int pollStartAddress;
+    int pollCurrentBatchSize;
+    DWORD pollBatchStartTick;
+    DWORD pollTotalBytesRead;
+    array<System::Byte>^ pollResponseBuffer;
+
     bool isAutoUpdating;
     bool isRegistersPanelExpanded;
     DateTime lastUpdateTime;
@@ -112,6 +138,11 @@ private:
     void InitializeCustomComponent();
     void InitializeParameters();
     void InitializeTimer();
+    void StartPollingCycle();
+    void SendPollBatch();
+    void ReadPollBatch();
+    void FinishPollingCycle();
+    void OnPollTimerTick(Object^ sender, EventArgs^ e);
     void RefreshPorts();
     void ConnectToPort();
     bool ConfigurePort();
@@ -140,6 +171,14 @@ private:
     // Вспомогательные методы
     float ConvertToFloat(uint32_t value);
     int32_t ConvertToInt32(uint32_t value);
+    uint32_t FloatToRaw(float value);
+    bool ReadLogicalReg32(int logicalReg, System::UInt32% rawValue, System::Int32% intValue, float% floatValue);
+    void UpdateDeviceInfoLabels();
+    void ClearDeviceInfoLabels();
+    float ConvertToFloatSwappedWords(uint32_t value);
+    bool ReadLogicalReg32WithFunction(int logicalReg, System::Byte functionCode,
+        System::UInt32% rawValue, System::Int32% intValue, float% floatValue);
+    void DebugTemperatureProbe();
 
     // Обработчики событий
     void Form1_Load(System::Object^ sender, System::EventArgs^ e);
