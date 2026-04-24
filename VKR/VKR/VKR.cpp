@@ -7,6 +7,7 @@ using namespace System::Drawing;
 using namespace System::Collections::Generic;
 using namespace System::Threading;
 
+
 // Таблицы CRC16
 static unsigned char auchCRCHi[] = {
     0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0, 0x80, 0x41, 0x01, 0xC0, 0x80, 0x41, 0x00, 0xC1, 0x81,
@@ -58,9 +59,11 @@ ModbusMasterForm::ModbusMasterForm(void)
 {
     InitializeComponent();
     InitializeCustomComponent();
-
-    // Инициализация
+    InitializeRegistersGrid();
+    InitializeParametersGrid();
+    InitializeLiveValuesPanel();
     allRegistersData = gcnew Dictionary<int, Tuple<float, int32_t>^>();
+    allRegistersRaw = gcnew Dictionary<int, System::UInt32>();
     paramNames = gcnew List<String^>();
     paramAddresses = gcnew List<int>();
     paramUnits = gcnew List<String^>();
@@ -76,34 +79,41 @@ ModbusMasterForm::ModbusMasterForm(void)
     isRegistersPanelExpanded = false;
     isUpdatingTables = false;
     isPollingInProgress = false;
+    isRegisterCellEditing = false;
+    resumeAutoUpdateAfterEdit = false;
+    pendingUiRefreshAfterEdit = false;
+    pollState = PollState::Idle;
+    pollStartAddress = 0;
+    pollCurrentBatchSize = 0;
+    pollBatchStartTick = 0;
+    pollTotalBytesRead = 0;
+    pollResponseBuffer = gcnew array<System::Byte>(1024);
     portLock = gcnew System::Object();
-    pollStartTime = 0;
-
-    // Буферы
-    readBuffer = gcnew array<unsigned char>(2048);
-    writeBuffer = gcnew array<unsigned char>(256);
-
-    // Конечный автомат
-    currentState = PollState::IDLE;
-    currentAddress = 0;
-    currentBatchSize = BATCH_SIZE;
-    waitCounter = 0;
-    totalRegistersRead = 0;
 
     InitializeParameters();
-    InitializeTimers();
+    InitializeTimer();
 
     originalFormHeight = this->Height;
     originalRegistersGroupHeight = groupBoxRegisters->Height;
-    CollapseRegistersPanel();
+    isRegistersPanelExpanded = true;
 }
 
 ModbusMasterForm::~ModbusMasterForm()
 {
     if (components) delete components;
     if (hSerial != INVALID_HANDLE_VALUE) ClosePort();
-    if (updateTimer != nullptr) { updateTimer->Stop(); delete updateTimer; }
-    if (pollTimer != nullptr) { pollTimer->Stop(); delete pollTimer; }
+
+    if (updateTimer != nullptr)
+    {
+        updateTimer->Stop();
+        delete updateTimer;
+    }
+
+    if (pollTimer != nullptr)
+    {
+        pollTimer->Stop();
+        delete pollTimer;
+    }
 }
 
 // ============================================================================
@@ -123,17 +133,23 @@ void ModbusMasterForm::InitializeComponent()
     this->labelSlaveID = (gcnew System::Windows::Forms::Label());
     this->numericSlaveID = (gcnew System::Windows::Forms::NumericUpDown());
     this->checkBoxShowAll = (gcnew System::Windows::Forms::CheckBox());
-    this->labelFoundDevices = (gcnew System::Windows::Forms::Label());
     this->textBoxScanResult = (gcnew System::Windows::Forms::TextBox());
+    this->labelFoundDevices = (gcnew System::Windows::Forms::Label());
+    this->labelModelCaption = (gcnew System::Windows::Forms::Label());
+    this->labelModelValue = (gcnew System::Windows::Forms::Label());
+    this->labelSerialCaption = (gcnew System::Windows::Forms::Label());
+    this->labelSerialValue = (gcnew System::Windows::Forms::Label());
+    this->labelTypeCaption = (gcnew System::Windows::Forms::Label());
+    this->labelTypeValue = (gcnew System::Windows::Forms::Label());
+    this->labelSpeedCaption = (gcnew System::Windows::Forms::Label());
+    this->labelSpeedValue = (gcnew System::Windows::Forms::Label());
     this->buttonClearLog = (gcnew System::Windows::Forms::Button());
-    this->progressBar = (gcnew System::Windows::Forms::ProgressBar());
     this->dataGridViewRegisters = (gcnew System::Windows::Forms::DataGridView());
     this->dataGridViewParameters = (gcnew System::Windows::Forms::DataGridView());
     this->buttonExport = (gcnew System::Windows::Forms::Button());
     this->buttonRefreshRegisters = (gcnew System::Windows::Forms::Button());
     this->buttonStartAutoUpdate = (gcnew System::Windows::Forms::Button());
     this->buttonStopAutoUpdate = (gcnew System::Windows::Forms::Button());
-    this->buttonToggleRegisters = (gcnew System::Windows::Forms::Button());
     this->buttonSendChanges = (gcnew System::Windows::Forms::Button());
     this->labelAutoUpdateStatus = (gcnew System::Windows::Forms::Label());
     this->groupBoxRegisters = (gcnew System::Windows::Forms::GroupBox());
@@ -146,16 +162,18 @@ void ModbusMasterForm::InitializeComponent()
     this->groupBoxRegisters->SuspendLayout();
     this->groupBoxParameters->SuspendLayout();
     this->SuspendLayout();
-
+    // 
     // comboBoxPorts
+    // 
     this->comboBoxPorts->DropDownStyle = System::Windows::Forms::ComboBoxStyle::DropDownList;
     this->comboBoxPorts->FormattingEnabled = true;
     this->comboBoxPorts->Location = System::Drawing::Point(15, 30);
     this->comboBoxPorts->Name = L"comboBoxPorts";
     this->comboBoxPorts->Size = System::Drawing::Size(150, 28);
     this->comboBoxPorts->TabIndex = 0;
-
+    // 
     // buttonRefresh
+    // 
     this->buttonRefresh->Location = System::Drawing::Point(175, 30);
     this->buttonRefresh->Name = L"buttonRefresh";
     this->buttonRefresh->Size = System::Drawing::Size(100, 30);
@@ -163,8 +181,9 @@ void ModbusMasterForm::InitializeComponent()
     this->buttonRefresh->Text = L"Обновить порты";
     this->buttonRefresh->UseVisualStyleBackColor = true;
     this->buttonRefresh->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonRefresh_Click);
-
+    // 
     // buttonConnect
+    // 
     this->buttonConnect->Location = System::Drawing::Point(285, 30);
     this->buttonConnect->Name = L"buttonConnect";
     this->buttonConnect->Size = System::Drawing::Size(100, 30);
@@ -172,8 +191,9 @@ void ModbusMasterForm::InitializeComponent()
     this->buttonConnect->Text = L"Подключить";
     this->buttonConnect->UseVisualStyleBackColor = true;
     this->buttonConnect->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonConnect_Click);
-
+    // 
     // buttonDisconnect
+    // 
     this->buttonDisconnect->Enabled = false;
     this->buttonDisconnect->Location = System::Drawing::Point(395, 30);
     this->buttonDisconnect->Name = L"buttonDisconnect";
@@ -182,67 +202,88 @@ void ModbusMasterForm::InitializeComponent()
     this->buttonDisconnect->Text = L"Отключить";
     this->buttonDisconnect->UseVisualStyleBackColor = true;
     this->buttonDisconnect->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonDisconnect_Click);
-
+    // 
     // buttonScanDevices
-    this->buttonScanDevices->Location = System::Drawing::Point(15, 95);
+    // 
+    this->buttonScanDevices->Location = System::Drawing::Point(523, 30);
     this->buttonScanDevices->Name = L"buttonScanDevices";
     this->buttonScanDevices->Size = System::Drawing::Size(150, 30);
     this->buttonScanDevices->TabIndex = 4;
     this->buttonScanDevices->Text = L"Поиск устройств";
     this->buttonScanDevices->UseVisualStyleBackColor = true;
     this->buttonScanDevices->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonScanDevices_Click);
-
+    // 
     // textBoxLog
-    this->textBoxLog->Location = System::Drawing::Point(12, 540);
+    // 
+    this->textBoxLog->Location = System::Drawing::Point(340, 533);
     this->textBoxLog->Multiline = true;
     this->textBoxLog->Name = L"textBoxLog";
     this->textBoxLog->ReadOnly = true;
     this->textBoxLog->ScrollBars = System::Windows::Forms::ScrollBars::Vertical;
-    this->textBoxLog->Size = System::Drawing::Size(1000, 140);
+    this->textBoxLog->Size = System::Drawing::Size(285, 140);
     this->textBoxLog->TabIndex = 5;
-
+    // 
     // labelStatus
+    // 
     this->labelStatus->AutoSize = true;
     this->labelStatus->Location = System::Drawing::Point(12, 695);
     this->labelStatus->Name = L"labelStatus";
     this->labelStatus->Size = System::Drawing::Size(148, 20);
     this->labelStatus->TabIndex = 6;
     this->labelStatus->Text = L"Статус: Отключен";
-
+    // 
     // groupBoxPort
+    // 
     this->groupBoxPort->Controls->Add(this->labelSlaveID);
     this->groupBoxPort->Controls->Add(this->numericSlaveID);
+    this->groupBoxPort->Controls->Add(this->labelAutoUpdateStatus);
     this->groupBoxPort->Controls->Add(this->checkBoxShowAll);
+    this->groupBoxPort->Controls->Add(this->buttonStopAutoUpdate);
     this->groupBoxPort->Controls->Add(this->comboBoxPorts);
+    this->groupBoxPort->Controls->Add(this->buttonStartAutoUpdate);
     this->groupBoxPort->Controls->Add(this->buttonScanDevices);
+    this->groupBoxPort->Controls->Add(this->buttonRefreshRegisters);
     this->groupBoxPort->Controls->Add(this->buttonRefresh);
     this->groupBoxPort->Controls->Add(this->buttonDisconnect);
     this->groupBoxPort->Controls->Add(this->buttonConnect);
+    this->groupBoxPort->Controls->Add(this->textBoxScanResult);
+    this->groupBoxPort->Controls->Add(this->labelFoundDevices);
+    this->groupBoxPort->Controls->Add(this->labelModelCaption);
+    this->groupBoxPort->Controls->Add(this->labelModelValue);
+    this->groupBoxPort->Controls->Add(this->labelSerialCaption);
+    this->groupBoxPort->Controls->Add(this->labelSerialValue);
+    this->groupBoxPort->Controls->Add(this->labelTypeCaption);
+    this->groupBoxPort->Controls->Add(this->labelTypeValue);
+    this->groupBoxPort->Controls->Add(this->labelSpeedCaption);
+    this->groupBoxPort->Controls->Add(this->labelSpeedValue);
     this->groupBoxPort->Location = System::Drawing::Point(12, 12);
     this->groupBoxPort->Name = L"groupBoxPort";
-    this->groupBoxPort->Size = System::Drawing::Size(1000, 140);
+    this->groupBoxPort->Size = System::Drawing::Size(1209, 131);
     this->groupBoxPort->TabIndex = 7;
     this->groupBoxPort->TabStop = false;
     this->groupBoxPort->Text = L"Управление портом (RS-485, 9600 бод)";
-
+    // 
     // labelSlaveID
+    // 
     this->labelSlaveID->AutoSize = true;
-    this->labelSlaveID->Location = System::Drawing::Point(505, 70);
+    this->labelSlaveID->Location = System::Drawing::Point(529, 69);
     this->labelSlaveID->Name = L"labelSlaveID";
     this->labelSlaveID->Size = System::Drawing::Size(120, 20);
     this->labelSlaveID->TabIndex = 12;
     this->labelSlaveID->Text = L"ID устройства:";
-
+    // 
     // numericSlaveID
-    this->numericSlaveID->Location = System::Drawing::Point(505, 95);
+    // 
+    this->numericSlaveID->Location = System::Drawing::Point(680, 69);
     this->numericSlaveID->Maximum = System::Decimal(gcnew cli::array< System::Int32 >(4) { 247, 0, 0, 0 });
     this->numericSlaveID->Minimum = System::Decimal(gcnew cli::array< System::Int32 >(4) { 1, 0, 0, 0 });
     this->numericSlaveID->Name = L"numericSlaveID";
     this->numericSlaveID->Size = System::Drawing::Size(60, 26);
     this->numericSlaveID->TabIndex = 11;
     this->numericSlaveID->Value = System::Decimal(gcnew cli::array< System::Int32 >(4) { 1, 0, 0, 0 });
-
+    // 
     // checkBoxShowAll
+    // 
     this->checkBoxShowAll->AutoSize = true;
     this->checkBoxShowAll->Location = System::Drawing::Point(15, 65);
     this->checkBoxShowAll->Name = L"checkBoxShowAll";
@@ -250,25 +291,100 @@ void ModbusMasterForm::InitializeComponent()
     this->checkBoxShowAll->TabIndex = 5;
     this->checkBoxShowAll->Text = L"Показывать занятые порты";
     this->checkBoxShowAll->UseVisualStyleBackColor = true;
-
+    // 
+    // textBoxScanResult
+    // 
+    this->textBoxScanResult->Location = System::Drawing::Point(803, 60);
+    this->textBoxScanResult->Multiline = true;
+    this->textBoxScanResult->Name = L"textBoxScanResult";
+    this->textBoxScanResult->Size = System::Drawing::Size(191, 60);
+    this->textBoxScanResult->TabIndex = 9;
+    this->textBoxScanResult->Visible = false;
+    // 
     // labelFoundDevices
+    // 
     this->labelFoundDevices->AutoSize = true;
-    this->labelFoundDevices->Location = System::Drawing::Point(12, 155);
+    this->labelFoundDevices->Location = System::Drawing::Point(803, 30);
     this->labelFoundDevices->Name = L"labelFoundDevices";
     this->labelFoundDevices->Size = System::Drawing::Size(191, 20);
     this->labelFoundDevices->TabIndex = 8;
     this->labelFoundDevices->Text = L"Найденные устройства:";
     this->labelFoundDevices->Visible = false;
-
-    // textBoxScanResult
-    this->textBoxScanResult->Location = System::Drawing::Point(12, 175);
-    this->textBoxScanResult->Multiline = true;
-    this->textBoxScanResult->Name = L"textBoxScanResult";
-    this->textBoxScanResult->Size = System::Drawing::Size(1000, 60);
-    this->textBoxScanResult->TabIndex = 9;
-    this->textBoxScanResult->Visible = false;
-
+    // 
+    // labelModelCaption
+    // 
+    this->labelModelCaption->AutoSize = true;
+    this->labelModelCaption->Location = System::Drawing::Point(824, 27);
+    this->labelModelCaption->Name = L"labelModelCaption";
+    this->labelModelCaption->Size = System::Drawing::Size(74, 20);
+    this->labelModelCaption->TabIndex = 13;
+    this->labelModelCaption->Text = L"Модель:";
+    // 
+    // labelModelValue
+    // 
+    this->labelModelValue->AutoSize = true;
+    this->labelModelValue->Location = System::Drawing::Point(954, 27);
+    this->labelModelValue->Name = L"labelModelValue";
+    this->labelModelValue->Size = System::Drawing::Size(14, 20);
+    this->labelModelValue->TabIndex = 14;
+    this->labelModelValue->Text = L"-";
+    // 
+    // labelSerialCaption
+    // 
+    this->labelSerialCaption->AutoSize = true;
+    this->labelSerialCaption->Location = System::Drawing::Point(824, 52);
+    this->labelSerialCaption->Name = L"labelSerialCaption";
+    this->labelSerialCaption->Size = System::Drawing::Size(140, 20);
+    this->labelSerialCaption->TabIndex = 15;
+    this->labelSerialCaption->Text = L"Серийный номер:";
+    // 
+    // labelSerialValue
+    // 
+    this->labelSerialValue->AutoSize = true;
+    this->labelSerialValue->Location = System::Drawing::Point(969, 52);
+    this->labelSerialValue->Name = L"labelSerialValue";
+    this->labelSerialValue->Size = System::Drawing::Size(14, 20);
+    this->labelSerialValue->TabIndex = 16;
+    this->labelSerialValue->Text = L"-";
+    // 
+    // labelTypeCaption
+    // 
+    this->labelTypeCaption->AutoSize = true;
+    this->labelTypeCaption->Location = System::Drawing::Point(824, 77);
+    this->labelTypeCaption->Name = L"labelTypeCaption";
+    this->labelTypeCaption->Size = System::Drawing::Size(40, 20);
+    this->labelTypeCaption->TabIndex = 17;
+    this->labelTypeCaption->Text = L"Тип:";
+    // 
+    // labelTypeValue
+    // 
+    this->labelTypeValue->AutoSize = true;
+    this->labelTypeValue->Location = System::Drawing::Point(954, 77);
+    this->labelTypeValue->Name = L"labelTypeValue";
+    this->labelTypeValue->Size = System::Drawing::Size(14, 20);
+    this->labelTypeValue->TabIndex = 18;
+    this->labelTypeValue->Text = L"-";
+    // 
+    // labelSpeedCaption
+    // 
+    this->labelSpeedCaption->AutoSize = true;
+    this->labelSpeedCaption->Location = System::Drawing::Point(824, 102);
+    this->labelSpeedCaption->Name = L"labelSpeedCaption";
+    this->labelSpeedCaption->Size = System::Drawing::Size(133, 20);
+    this->labelSpeedCaption->TabIndex = 19;
+    this->labelSpeedCaption->Text = L"Скорость UART:";
+    // 
+    // labelSpeedValue
+    // 
+    this->labelSpeedValue->AutoSize = true;
+    this->labelSpeedValue->Location = System::Drawing::Point(954, 102);
+    this->labelSpeedValue->Name = L"labelSpeedValue";
+    this->labelSpeedValue->Size = System::Drawing::Size(14, 20);
+    this->labelSpeedValue->TabIndex = 20;
+    this->labelSpeedValue->Text = L"-";
+    // 
     // buttonClearLog
+    // 
     this->buttonClearLog->Location = System::Drawing::Point(940, 695);
     this->buttonClearLog->Name = L"buttonClearLog";
     this->buttonClearLog->Size = System::Drawing::Size(72, 30);
@@ -276,16 +392,9 @@ void ModbusMasterForm::InitializeComponent()
     this->buttonClearLog->Text = L"Очистить лог";
     this->buttonClearLog->UseVisualStyleBackColor = true;
     this->buttonClearLog->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonClearLog_Click);
-
-    // progressBar
-    this->progressBar->Location = System::Drawing::Point(12, 250);
-    this->progressBar->Name = L"progressBar";
-    this->progressBar->Size = System::Drawing::Size(500, 23);
-    this->progressBar->Minimum = 0;
-    this->progressBar->Maximum = MAX_REGISTER_ADDRESS;
-    this->progressBar->TabIndex = 11;
-
+    // 
     // dataGridViewRegisters
+    // 
     this->dataGridViewRegisters->AllowUserToAddRows = false;
     this->dataGridViewRegisters->AllowUserToDeleteRows = false;
     this->dataGridViewRegisters->ColumnHeadersHeightSizeMode = System::Windows::Forms::DataGridViewColumnHeadersHeightSizeMode::AutoSize;
@@ -293,11 +402,15 @@ void ModbusMasterForm::InitializeComponent()
     this->dataGridViewRegisters->Location = System::Drawing::Point(3, 22);
     this->dataGridViewRegisters->Name = L"dataGridViewRegisters";
     this->dataGridViewRegisters->RowHeadersWidth = 62;
-    this->dataGridViewRegisters->Size = System::Drawing::Size(600, 145);
+    this->dataGridViewRegisters->Size = System::Drawing::Size(556, 491);
     this->dataGridViewRegisters->TabIndex = 0;
     this->dataGridViewRegisters->CellValueChanged += gcnew System::Windows::Forms::DataGridViewCellEventHandler(this, &ModbusMasterForm::dataGridViewRegisters_CellValueChanged);
-
+    this->dataGridViewRegisters->CellBeginEdit += gcnew System::Windows::Forms::DataGridViewCellCancelEventHandler(this, &ModbusMasterForm::dataGridViewRegisters_CellBeginEdit);
+    this->dataGridViewRegisters->CellEndEdit += gcnew System::Windows::Forms::DataGridViewCellEventHandler(this, &ModbusMasterForm::dataGridViewRegisters_CellEndEdit);
+    
+    // 
     // dataGridViewParameters
+    // 
     this->dataGridViewParameters->AllowUserToAddRows = false;
     this->dataGridViewParameters->AllowUserToDeleteRows = false;
     this->dataGridViewParameters->ColumnHeadersHeightSizeMode = System::Windows::Forms::DataGridViewColumnHeadersHeightSizeMode::AutoSize;
@@ -306,109 +419,101 @@ void ModbusMasterForm::InitializeComponent()
     this->dataGridViewParameters->Name = L"dataGridViewParameters";
     this->dataGridViewParameters->ReadOnly = true;
     this->dataGridViewParameters->RowHeadersWidth = 62;
-    this->dataGridViewParameters->Size = System::Drawing::Size(382, 145);
+    this->dataGridViewParameters->Size = System::Drawing::Size(663, 341);
     this->dataGridViewParameters->TabIndex = 1;
     this->dataGridViewParameters->CellDoubleClick += gcnew System::Windows::Forms::DataGridViewCellEventHandler(this, &ModbusMasterForm::dataGridViewParameters_CellDoubleClick);
-
+    // 
     // buttonExport
-    this->buttonExport->Location = System::Drawing::Point(520, 250);
+    // 
+    this->buttonExport->Location = System::Drawing::Point(224, 638);
     this->buttonExport->Name = L"buttonExport";
     this->buttonExport->Size = System::Drawing::Size(100, 35);
-    this->buttonExport->TabIndex = 12;
+    this->buttonExport->TabIndex = 1;
     this->buttonExport->Text = L"Экспорт в CSV";
     this->buttonExport->UseVisualStyleBackColor = true;
     this->buttonExport->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonExport_Click);
-
+    // 
     // buttonRefreshRegisters
-    this->buttonRefreshRegisters->Location = System::Drawing::Point(118, 290);
+    // 
+    this->buttonRefreshRegisters->Location = System::Drawing::Point(261, 92);
     this->buttonRefreshRegisters->Name = L"buttonRefreshRegisters";
     this->buttonRefreshRegisters->Size = System::Drawing::Size(100, 35);
     this->buttonRefreshRegisters->TabIndex = 2;
     this->buttonRefreshRegisters->Text = L"Обновить";
     this->buttonRefreshRegisters->UseVisualStyleBackColor = true;
     this->buttonRefreshRegisters->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonRefreshRegisters_Click);
-
+    // 
     // buttonStartAutoUpdate
-    this->buttonStartAutoUpdate->Location = System::Drawing::Point(224, 290);
+    // 
+    this->buttonStartAutoUpdate->Location = System::Drawing::Point(367, 92);
     this->buttonStartAutoUpdate->Name = L"buttonStartAutoUpdate";
     this->buttonStartAutoUpdate->Size = System::Drawing::Size(120, 35);
     this->buttonStartAutoUpdate->TabIndex = 3;
     this->buttonStartAutoUpdate->Text = L"Автообновление ВКЛ";
     this->buttonStartAutoUpdate->UseVisualStyleBackColor = true;
     this->buttonStartAutoUpdate->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonStartAutoUpdate_Click);
-
+    // 
     // buttonStopAutoUpdate
+    // 
     this->buttonStopAutoUpdate->Enabled = false;
-    this->buttonStopAutoUpdate->Location = System::Drawing::Point(350, 290);
+    this->buttonStopAutoUpdate->Location = System::Drawing::Point(493, 92);
     this->buttonStopAutoUpdate->Name = L"buttonStopAutoUpdate";
     this->buttonStopAutoUpdate->Size = System::Drawing::Size(120, 35);
     this->buttonStopAutoUpdate->TabIndex = 4;
     this->buttonStopAutoUpdate->Text = L"Автообновление ВЫКЛ";
     this->buttonStopAutoUpdate->UseVisualStyleBackColor = true;
     this->buttonStopAutoUpdate->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonStopAutoUpdate_Click);
-
-    // buttonToggleRegisters
-    this->buttonToggleRegisters->Location = System::Drawing::Point(476, 290);
-    this->buttonToggleRegisters->Name = L"buttonToggleRegisters";
-    this->buttonToggleRegisters->Size = System::Drawing::Size(140, 35);
-    this->buttonToggleRegisters->TabIndex = 5;
-    this->buttonToggleRegisters->Text = L"Развернуть таблицу регистров";
-    this->buttonToggleRegisters->UseVisualStyleBackColor = true;
-    this->buttonToggleRegisters->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonToggleRegisters_Click);
-
+    // 
     // buttonSendChanges
+    // 
     this->buttonSendChanges->Enabled = false;
-    this->buttonSendChanges->Location = System::Drawing::Point(622, 290);
+    this->buttonSendChanges->Location = System::Drawing::Point(98, 638);
     this->buttonSendChanges->Name = L"buttonSendChanges";
     this->buttonSendChanges->Size = System::Drawing::Size(120, 35);
     this->buttonSendChanges->TabIndex = 6;
     this->buttonSendChanges->Text = L"Отправить изменения";
     this->buttonSendChanges->UseVisualStyleBackColor = true;
     this->buttonSendChanges->Click += gcnew System::EventHandler(this, &ModbusMasterForm::buttonSendChanges_Click);
-
+    // 
     // labelAutoUpdateStatus
+    // 
     this->labelAutoUpdateStatus->AutoSize = true;
-    this->labelAutoUpdateStatus->Location = System::Drawing::Point(12, 335);
+    this->labelAutoUpdateStatus->Location = System::Drawing::Point(11, 97);
     this->labelAutoUpdateStatus->Name = L"labelAutoUpdateStatus";
     this->labelAutoUpdateStatus->Size = System::Drawing::Size(232, 20);
     this->labelAutoUpdateStatus->TabIndex = 5;
     this->labelAutoUpdateStatus->Text = L"Автообновление: выключено";
-
+    // 
     // groupBoxRegisters
+    // 
     this->groupBoxRegisters->Controls->Add(this->dataGridViewRegisters);
-    this->groupBoxRegisters->Location = System::Drawing::Point(12, 360);
+    this->groupBoxRegisters->Location = System::Drawing::Point(692, 161);
     this->groupBoxRegisters->Name = L"groupBoxRegisters";
-    this->groupBoxRegisters->Size = System::Drawing::Size(606, 170);
+    this->groupBoxRegisters->Size = System::Drawing::Size(562, 516);
     this->groupBoxRegisters->TabIndex = 6;
     this->groupBoxRegisters->TabStop = false;
-    this->groupBoxRegisters->Text = L"Все регистры [СВЕРНУТО]";
-
+    this->groupBoxRegisters->Text = L"Все регистры (32-битные значения)";
+    // 
     // groupBoxParameters
+    // 
     this->groupBoxParameters->Controls->Add(this->dataGridViewParameters);
-    this->groupBoxParameters->Location = System::Drawing::Point(624, 360);
+    this->groupBoxParameters->Location = System::Drawing::Point(16, 161);
     this->groupBoxParameters->Name = L"groupBoxParameters";
-    this->groupBoxParameters->Size = System::Drawing::Size(388, 170);
+    this->groupBoxParameters->Size = System::Drawing::Size(669, 366);
     this->groupBoxParameters->TabIndex = 7;
     this->groupBoxParameters->TabStop = false;
     this->groupBoxParameters->Text = L"Контролируемые параметры";
-
+    // 
     // ModbusMasterForm
+    // 
     this->AutoScaleDimensions = System::Drawing::SizeF(9, 20);
     this->AutoScaleMode = System::Windows::Forms::AutoScaleMode::Font;
-    this->ClientSize = System::Drawing::Size(1024, 740);
-    this->Controls->Add(this->progressBar);
+    this->ClientSize = System::Drawing::Size(1266, 740);
     this->Controls->Add(this->groupBoxParameters);
     this->Controls->Add(this->groupBoxRegisters);
-    this->Controls->Add(this->labelAutoUpdateStatus);
     this->Controls->Add(this->buttonSendChanges);
-    this->Controls->Add(this->buttonToggleRegisters);
-    this->Controls->Add(this->buttonStopAutoUpdate);
-    this->Controls->Add(this->buttonStartAutoUpdate);
-    this->Controls->Add(this->buttonRefreshRegisters);
     this->Controls->Add(this->buttonExport);
     this->Controls->Add(this->buttonClearLog);
-    this->Controls->Add(this->textBoxScanResult);
-    this->Controls->Add(this->labelFoundDevices);
     this->Controls->Add(this->groupBoxPort);
     this->Controls->Add(this->labelStatus);
     this->Controls->Add(this->textBoxLog);
@@ -418,7 +523,6 @@ void ModbusMasterForm::InitializeComponent()
     this->Name = L"ModbusMasterForm";
     this->Text = L"Modbus Master для RS-485 устройства (Монитор регистров)";
     this->Load += gcnew System::EventHandler(this, &ModbusMasterForm::Form1_Load);
-
     this->groupBoxPort->ResumeLayout(false);
     this->groupBoxPort->PerformLayout();
     (cli::safe_cast<System::ComponentModel::ISupportInitialize^>(this->numericSlaveID))->EndInit();
@@ -428,6 +532,7 @@ void ModbusMasterForm::InitializeComponent()
     this->groupBoxParameters->ResumeLayout(false);
     this->ResumeLayout(false);
     this->PerformLayout();
+
 }
 
 void ModbusMasterForm::InitializeCustomComponent()
@@ -437,12 +542,52 @@ void ModbusMasterForm::InitializeCustomComponent()
     numericSlaveID->Value = 1;
 }
 
+void ModbusMasterForm::InitializeRegistersGrid()
+{
+    dataGridViewRegisters->Columns->Clear();
+
+    dataGridViewRegisters->AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode::None;
+    dataGridViewRegisters->ScrollBars = ScrollBars::Both;
+
+    dataGridViewRegisters->Columns->Add(L"Address", L"Адрес");
+    dataGridViewRegisters->Columns->Add(L"ValueHex", L"Значение (hex)");
+    dataGridViewRegisters->Columns->Add(L"ValueInt32", L"Значение (int32)");
+    dataGridViewRegisters->Columns->Add(L"ValueFloat", L"Значение (float)");
+
+    dataGridViewRegisters->Columns[0]->Width = 100;
+    dataGridViewRegisters->Columns[1]->Width = 150;
+    dataGridViewRegisters->Columns[2]->Width = 120;
+    dataGridViewRegisters->Columns[3]->Width = 120;
+}
+
+void ModbusMasterForm::InitializeParametersGrid()
+{
+    dataGridViewParameters->Columns->Clear();
+
+    dataGridViewParameters->AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode::None;
+    dataGridViewParameters->ScrollBars = ScrollBars::Both;
+    dataGridViewParameters->ReadOnly = true;
+
+    dataGridViewParameters->Columns->Add(L"DateTime", L"Дата/Время");
+    dataGridViewParameters->Columns->Add(L"Parameter", L"Параметр");
+    dataGridViewParameters->Columns->Add(L"RegisterAddr", L"Адрес регистра");
+    dataGridViewParameters->Columns->Add(L"Value", L"Значение");
+    dataGridViewParameters->Columns->Add(L"Unit", L"Ед. изм.");
+
+    dataGridViewParameters->Columns[0]->Width = 140;
+    dataGridViewParameters->Columns[1]->Width = 140;
+    dataGridViewParameters->Columns[2]->Width = 120;
+    dataGridViewParameters->Columns[3]->Width = 110;
+    dataGridViewParameters->Columns[4]->Width = 90;
+}
+
 void ModbusMasterForm::InitializeParameters()
 {
     paramNames->Clear();
     paramAddresses->Clear();
     paramUnits->Clear();
 
+    // Физические адреса 16-битных регистров (согласно документации)
     paramNames->Add(L"Плотность");
     paramAddresses->Add(257);
     paramUnits->Add(L"кг/м³");
@@ -472,61 +617,491 @@ void ModbusMasterForm::InitializeParameters()
     paramUnits->Add(L"");
 }
 
-void ModbusMasterForm::InitializeTimers()
+void ModbusMasterForm::InitializeTimer()
 {
     updateTimer = gcnew System::Windows::Forms::Timer();
-    updateTimer->Interval = 4000;
-    updateTimer->Tick += gcnew EventHandler(this, &ModbusMasterForm::OnUpdateTimerTick);
+    updateTimer->Interval = 5000; // стартово 5 секунд
+    updateTimer->Tick += gcnew EventHandler(this, &ModbusMasterForm::OnTimerTick);
 
     pollTimer = gcnew System::Windows::Forms::Timer();
-    pollTimer->Interval = 25;  // ← 25 мс вместо 50 (в 2 раза быстрее)
+    pollTimer->Interval = 5; // короткий шаг, чтобы UI успевал жить
     pollTimer->Tick += gcnew EventHandler(this, &ModbusMasterForm::OnPollTimerTick);
 
     isAutoUpdating = false;
+    pollState = PollState::Idle;
+}
+void ModbusMasterForm::InitializeLiveValuesPanel()
+{
+    groupBoxLiveValues = gcnew GroupBox();
+    labelLiveDensityCaption = gcnew Label();
+    labelLiveTemperatureCaption = gcnew Label();
+    labelLiveUoutCaption = gcnew Label();
+
+    textBoxLiveDensity = gcnew TextBox();
+    textBoxLiveTemperature = gcnew TextBox();
+    textBoxLiveUout = gcnew TextBox();
+
+    groupBoxLiveValues->Location = System::Drawing::Point(16, 533);
+    groupBoxLiveValues->Name = L"groupBoxLiveValues";
+    groupBoxLiveValues->Size = System::Drawing::Size(318, 95);
+    groupBoxLiveValues->TabStop = false;
+    groupBoxLiveValues->Text = L"";
+
+    labelLiveDensityCaption->AutoSize = true;
+    labelLiveDensityCaption->Location = System::Drawing::Point(10, 25);
+    labelLiveDensityCaption->Text = L"Плотность:";
+
+    textBoxLiveDensity->Location = System::Drawing::Point(120, 22);
+    textBoxLiveDensity->Size = System::Drawing::Size(185, 26);
+    textBoxLiveDensity->ReadOnly = true;
+    textBoxLiveDensity->TabStop = false;
+
+    labelLiveTemperatureCaption->AutoSize = true;
+    labelLiveTemperatureCaption->Location = System::Drawing::Point(10, 55);
+    labelLiveTemperatureCaption->Text = L"Температура:";
+
+    textBoxLiveTemperature->Location = System::Drawing::Point(120, 52);
+    textBoxLiveTemperature->Size = System::Drawing::Size(185, 26);
+    textBoxLiveTemperature->ReadOnly = true;
+    textBoxLiveTemperature->TabStop = false;
+
+    labelLiveUoutCaption->AutoSize = true;
+    labelLiveUoutCaption->Location = System::Drawing::Point(10, 85);
+    labelLiveUoutCaption->Text = L"Uout:";
+
+    textBoxLiveUout->Location = System::Drawing::Point(120, 82);
+    textBoxLiveUout->Size = System::Drawing::Size(185, 26);
+    textBoxLiveUout->ReadOnly = true;
+    textBoxLiveUout->TabStop = false;
+
+    // уменьшим высоту группы, чтобы третья строка влезла
+    groupBoxLiveValues->Size = System::Drawing::Size(318, 115);
+
+    groupBoxLiveValues->Controls->Add(labelLiveDensityCaption);
+    groupBoxLiveValues->Controls->Add(textBoxLiveDensity);
+    groupBoxLiveValues->Controls->Add(labelLiveTemperatureCaption);
+    groupBoxLiveValues->Controls->Add(textBoxLiveTemperature);
+    groupBoxLiveValues->Controls->Add(labelLiveUoutCaption);
+    groupBoxLiveValues->Controls->Add(textBoxLiveUout);
+
+    this->Controls->Add(groupBoxLiveValues);
+
+    textBoxLiveDensity->Text = L"-";
+    textBoxLiveTemperature->Text = L"-";
+    textBoxLiveUout->Text = L"-";
+}
+
+void ModbusMasterForm::StartPollingCycle()
+{
+    if (hSerial == INVALID_HANDLE_VALUE) return;
+    if (isPollingInProgress) return;
+
+    allRegistersData->Clear();
+    allRegistersRaw->Clear();
+    pollStartAddress = 0;
+    pollCurrentBatchSize = 0;
+    pollBatchStartTick = 0;
+    pollTotalBytesRead = 0;
+    Array::Clear(pollResponseBuffer, 0, pollResponseBuffer->Length);
+
+    pollState = PollState::SendBatch;
+    isPollingInProgress = true;
+
+    pollTimer->Start();
+}
+
+void ModbusMasterForm::SendPollBatch()
+{
+    if (hSerial == INVALID_HANDLE_VALUE)
+    {
+        FinishPollingCycle();
+        return;
+    }
+
+    const int BATCH_SIZE = 20;
+    const int MAX_REGISTER_ADDRESS = TOTAL_32BIT_VALUES;
+
+    if (pollStartAddress >= MAX_REGISTER_ADDRESS)
+    {
+        FinishPollingCycle();
+        return;
+    }
+
+    // Не даём батчу пересекать границу 256
+    int boundary = ((pollStartAddress / 256) + 1) * 256;
+    int maxUntilBoundary = boundary - pollStartAddress;
+
+    pollCurrentBatchSize = min(BATCH_SIZE, MAX_REGISTER_ADDRESS - pollStartAddress);
+    pollCurrentBatchSize = min(pollCurrentBatchSize, maxUntilBoundary);
+
+    uint8_t slaveID = static_cast<uint8_t>(numericSlaveID->Value);
+
+    std::vector<uint8_t> request;
+    request.push_back(slaveID);
+    request.push_back(0x03);
+    request.push_back((pollStartAddress >> 8) & 0xFF);
+    request.push_back(pollStartAddress & 0xFF);
+    request.push_back((pollCurrentBatchSize >> 8) & 0xFF);
+    request.push_back(pollCurrentBatchSize & 0xFF);
+
+    uint16_t crc = CalculateCRC16(request.data(), request.size());
+    request.push_back(crc & 0xFF);
+    request.push_back((crc >> 8) & 0xFF);
+
+    PurgeComm(hSerial, PURGE_RXCLEAR);
+
+    DWORD bytesWritten = 0;
+    if (!WriteFile(hSerial, request.data(), (DWORD)request.size(), &bytesWritten, NULL))
+    {
+        pollStartAddress += pollCurrentBatchSize;
+        pollState = PollState::SendBatch;
+        return;
+    }
+
+    pollBatchStartTick = GetTickCount();
+    pollTotalBytesRead = 0;
+    Array::Clear(pollResponseBuffer, 0, pollResponseBuffer->Length);
+
+    pollState = PollState::WaitBatch;
+}
+
+void ModbusMasterForm::ReadPollBatch()
+{
+    if (hSerial == INVALID_HANDLE_VALUE)
+    {
+        FinishPollingCycle();
+        return;
+    }
+
+    pin_ptr<System::Byte> pResponse = &pollResponseBuffer[0];
+
+    DWORD bytesRead = 0;
+    ReadFile(hSerial,reinterpret_cast<void*>(pResponse + pollTotalBytesRead),pollResponseBuffer->Length - pollTotalBytesRead,&bytesRead,NULL);
+
+    if (bytesRead > 0)
+    {
+        pollTotalBytesRead += bytesRead;
+
+        uint8_t slaveID = static_cast<uint8_t>(numericSlaveID->Value);
+
+        if (pollTotalBytesRead >= 3 &&
+            pResponse[0] == slaveID &&
+            pResponse[1] == 0x03)
+        {
+            int expectedLength = pResponse[2] + 5; // slave + func + byteCount + data + CRC
+
+            if (pollTotalBytesRead >= static_cast<DWORD>(expectedLength))
+            {
+                if (CheckCRC(reinterpret_cast<uint8_t*>(pResponse), expectedLength))
+                {
+                    uint8_t dataLength = pResponse[2];
+                    int expectedDataLength = pollCurrentBatchSize * 4;
+
+                    if (dataLength != expectedDataLength)
+                    {
+                        LogMessage(String::Format(
+                            L"SHORT BATCH: start={0}, requestedRegs={1}, expectedBytes={2}, gotBytes={3}",
+                            pollStartAddress,
+                            pollCurrentBatchSize,
+                            expectedDataLength,
+                            dataLength));
+
+                        pollStartAddress += pollCurrentBatchSize;
+                        pollState = PollState::SendBatch;
+                        return;
+                    }
+
+                    int registerCount = dataLength / 4;
+
+                    for (int i = 0; i < registerCount; i++)
+                    {
+                        int logicalReg = pollStartAddress + i;
+
+                        System::UInt32 raw =
+                            ((System::UInt32)pResponse[3 + i * 4]) |
+                            ((System::UInt32)pResponse[4 + i * 4] << 8) |
+                            ((System::UInt32)pResponse[5 + i * 4] << 16) |
+                            ((System::UInt32)pResponse[6 + i * 4] << 24);
+
+                        float floatValue = ConvertToFloat(static_cast<uint32_t>(raw));
+                        int32_t intValue = static_cast<int32_t>(raw);
+
+                        allRegistersRaw[logicalReg] = raw;
+                        allRegistersData[logicalReg] = Tuple::Create(floatValue, intValue);
+                    }
+                }
+
+                pollStartAddress += pollCurrentBatchSize;
+                pollState = PollState::SendBatch;
+                return;
+            }
+        }
+    }
+
+    if ((GetTickCount() - pollBatchStartTick) >= 500)
+    {
+        pollStartAddress += pollCurrentBatchSize;
+        pollState = PollState::SendBatch;
+    }
+}
+
+void ModbusMasterForm::FinishPollingCycle()
+{
+    pollTimer->Stop();
+    pollState = PollState::Idle;
+    isPollingInProgress = false;
+
+    // Эти 3 поля обновляем всегда, даже во время редактирования
+    UpdateLiveValuesPanel();
+
+    // Таблицы не трогаем, если пользователь редактирует
+    if (isRegisterCellEditing)
+    {
+        pendingTablesRefresh = true;
+    }
+    else
+    {
+        UpdateRegistersData();
+        pendingTablesRefresh = false;
+    }
+
+    lastUpdateTime = DateTime::Now;
+
+    LogMessage(String::Format(
+        L"Цикл опроса завершён: {0:dd.MM.yyyy HH:mm:ss}",
+        lastUpdateTime));
+
+    if (isAutoUpdating)
+    {
+        labelAutoUpdateStatus->Text =
+            String::Format(L"Автообновление: активно (последнее: {0:HH:mm:ss})", lastUpdateTime);
+    }
+    else
+    {
+        labelAutoUpdateStatus->Text =
+            String::Format(L"Обновлено: {0:HH:mm:ss}", lastUpdateTime);
+    }
+}
+
+void ModbusMasterForm::OnPollTimerTick(Object^ sender, EventArgs^ e)
+{
+    switch (pollState)
+    {
+    case PollState::Idle:
+        pollTimer->Stop();
+        break;
+
+    case PollState::SendBatch:
+        SendPollBatch();
+        break;
+
+    case PollState::WaitBatch:
+        ReadPollBatch();
+        break;
+    }
 }
 
 // ============================================================================
-// Быстрые преобразования
+// Вспомогательные методы для преобразования
 // ============================================================================
 
-union FloatUnion {
-    float f;
-    struct {
-        unsigned char b0, b1, b2, b3;
-    } bytes;
-};
-
-float ModbusMasterForm::BytesToFloat(array<unsigned char>^ bytes, int offset)
+float ModbusMasterForm::ConvertToFloat(uint32_t value)
 {
-    FloatUnion fu;
-    fu.bytes.b0 = bytes[offset + 1];
-    fu.bytes.b1 = bytes[offset + 0];
-    fu.bytes.b2 = bytes[offset + 3];
-    fu.bytes.b3 = bytes[offset + 2];
-    return fu.f;
+    float result;
+    memcpy(&result, &value, sizeof(float));
+    return result;
+}
+uint32_t ModbusMasterForm::FloatToRaw(float value)
+{
+    uint32_t raw;
+    memcpy(&raw, &value, sizeof(float));
+    return raw;
+}
+int32_t ModbusMasterForm::ConvertToInt32(uint32_t value)
+{
+    return static_cast<int32_t>(value);
+}
+float ModbusMasterForm::ConvertToFloatSwappedWords(uint32_t value)
+{
+    uint32_t swapped = ((value & 0x0000FFFF) << 16) | ((value & 0xFFFF0000) >> 16);
+    float result;
+    memcpy(&result, &swapped, sizeof(float));
+    return result;
 }
 
-void ModbusMasterForm::FloatToBytes(float value, array<unsigned char>^ buffer, int offset)
+bool ModbusMasterForm::ReadLogicalReg32(int logicalReg, System::UInt32% rawValue, System::Int32% intValue, float% floatValue)
 {
-    FloatUnion fu;
-    fu.f = value;
-    buffer[offset + 0] = fu.bytes.b1;
-    buffer[offset + 1] = fu.bytes.b0;
-    buffer[offset + 2] = fu.bytes.b3;
-    buffer[offset + 3] = fu.bytes.b2;
+    return ReadLogicalReg32WithFunction(logicalReg, 0x03, rawValue, intValue, floatValue);
+}
+bool ModbusMasterForm::ReadLogicalReg32WithFunction(
+    int logicalReg,
+    System::Byte functionCode,
+    System::UInt32% rawValue,
+    System::Int32% intValue,
+    float% floatValue)
+{
+    rawValue = 0;
+    intValue = 0;
+    floatValue = 0.0f;
+
+    if (hSerial == INVALID_HANDLE_VALUE)
+        return false;
+
+    int startAddress = logicalReg;
+    uint8_t slaveID = static_cast<uint8_t>(numericSlaveID->Value);
+
+    std::vector<uint8_t> request;
+    request.push_back(slaveID);
+    request.push_back(functionCode);
+    request.push_back((startAddress >> 8) & 0xFF);
+    request.push_back(startAddress & 0xFF);
+    request.push_back(0x00);
+    request.push_back(0x01); // один логический 32-битный регистр
+
+    uint16_t crc = CalculateCRC16(request.data(), request.size());
+    request.push_back(crc & 0xFF);
+    request.push_back((crc >> 8) & 0xFF);
+
+    Monitor::Enter(portLock);
+    try
+    {
+        PurgeComm(hSerial, PURGE_RXCLEAR);
+
+        DWORD bytesWritten = 0;
+        if (!WriteFile(hSerial, request.data(), (DWORD)request.size(), &bytesWritten, NULL) ||
+            bytesWritten != request.size())
+        {
+            return false;
+        }
+
+        uint8_t response[64] = { 0 };
+        DWORD totalBytesRead = 0;
+        DWORD bytesRead = 0;
+        DWORD startTime = GetTickCount();
+
+        while ((GetTickCount() - startTime) < 600)
+        {
+            if (ReadFile(hSerial,
+                response + totalBytesRead,
+                sizeof(response) - totalBytesRead,
+                &bytesRead,
+                NULL))
+            {
+                if (bytesRead > 0)
+                {
+                    totalBytesRead += bytesRead;
+
+                    if (totalBytesRead >= 5 && response[0] == slaveID && response[1] == (functionCode | 0x80))
+                    {
+                        return false;
+                    }
+
+                    if (totalBytesRead >= 3 && response[0] == slaveID && response[1] == functionCode)
+                    {
+                        int expectedLength = response[2] + 5;
+                        if (totalBytesRead >= (DWORD)expectedLength)
+                        {
+                            if (!CheckCRC(response, expectedLength))
+                                return false;
+
+                            if (response[2] != 0x04)
+                                return false;
+
+                            System::UInt32 raw =
+                                ((System::UInt32)response[3]) |
+                                ((System::UInt32)response[4] << 8) |
+                                ((System::UInt32)response[5] << 16) |
+                                ((System::UInt32)response[6] << 24);
+
+                            rawValue = raw;
+                            intValue = static_cast<System::Int32>(raw);
+                            floatValue = ConvertToFloat(static_cast<uint32_t>(raw));
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            Sleep(5);
+        }
+
+        return false;
+    }
+    finally
+    {
+        Monitor::Exit(portLock);
+    }
+}
+void ModbusMasterForm::ClearDeviceInfoLabels()
+{
+    labelModelValue->Text = L"-";
+    labelSerialValue->Text = L"-";
+    labelTypeValue->Text = L"-";
+    labelSpeedValue->Text = L"-";
 }
 
-uint16_t ModbusMasterForm::BytesToUInt16(array<unsigned char>^ bytes, int offset)
+void ModbusMasterForm::UpdateDeviceInfoLabels()
 {
-    return (bytes[offset + 1] << 8) | bytes[offset];
-}
+    if (hSerial == INVALID_HANDLE_VALUE)
+    {
+        ClearDeviceInfoLabels();
+        return;
+    }
 
-void ModbusMasterForm::UInt16ToBytes(uint16_t value, array<unsigned char>^ buffer, int offset)
+    System::UInt32 raw = 0;
+    System::Int32 asInt = 0;
+    float asFloat = 0.0f;
+
+    if (ReadLogicalReg32(200, raw, asInt, asFloat))
+        labelModelValue->Text = asInt.ToString();
+    else
+        labelModelValue->Text = L"-";
+
+    if (ReadLogicalReg32(203, raw, asInt, asFloat))
+        labelSerialValue->Text = asInt.ToString();
+    else
+        labelSerialValue->Text = L"-";
+
+    if (ReadLogicalReg32(204, raw, asInt, asFloat))
+        labelTypeValue->Text = asInt.ToString();
+    else
+        labelTypeValue->Text = L"-";
+
+    if (ReadLogicalReg32(205, raw, asInt, asFloat))
+        labelSpeedValue->Text = asInt.ToString();
+    else
+        labelSpeedValue->Text = L"-";
+}
+void ModbusMasterForm::DebugTemperatureProbe()
 {
-    buffer[offset] = value & 0xFF;
-    buffer[offset + 1] = (value >> 8) & 0xFF;
-}
+    array<int>^ regs = gcnew array<int> { 258, 259, 260, 261 };
+    array<System::Byte>^ funcs = gcnew array<System::Byte> { 0x03, 0x04 };
 
+    for each (System::Byte fc in funcs)
+    {
+        for each (int reg in regs)
+        {
+            System::UInt32 raw = 0;
+            System::Int32 asInt = 0;
+            float asFloat = 0.0f;
+
+            if (ReadLogicalReg32WithFunction(reg, fc, raw, asInt, asFloat))
+            {
+                float swapped = ConvertToFloatSwappedWords(raw);
+
+                LogMessage(String::Format(
+                    L"TEMP TEST fc=0x{0:X2} Reg{1}: raw=0x{2:X8}, int={3}, float={4:F6}, swapped={5:F6}",
+                    fc, reg, raw, asInt, asFloat, swapped));
+            }
+            else
+            {
+                LogMessage(String::Format(
+                    L"TEMP TEST fc=0x{0:X2} Reg{1}: нет данных/ошибка",
+                    fc, reg));
+            }
+        }
+    }
+}
 // ============================================================================
 // Работа с портом
 // ============================================================================
@@ -589,6 +1164,7 @@ void ModbusMasterForm::RefreshPorts()
                     if (showAll)
                     {
                         portSet.insert(portName);
+                        LogMessage(L"Найден порт: " + StringToWString(portName));
                     }
                     else
                     {
@@ -599,6 +1175,7 @@ void ModbusMasterForm::RefreshPorts()
                         {
                             CloseHandle(hTest);
                             portSet.insert(portName);
+                            LogMessage(L"Найден доступный порт: " + StringToWString(portName));
                         }
                     }
                 }
@@ -610,11 +1187,12 @@ void ModbusMasterForm::RefreshPorts()
 
     for (const auto& port : portSet)
     {
-        std::string displayName = port.substr(4);
-        String^ managedPortName = gcnew String(displayName.c_str());
+        std::string displayName = port.substr(4); 
+        String^ managedDisplayName = gcnew String(displayName.c_str());
+        String^ managedFullName = gcnew String(port.c_str()); // 
 
-        availablePorts->Add(managedPortName);
-        comboBoxPorts->Items->Add(managedPortName);
+        availablePorts->Add(managedFullName);       // для CreateFile
+        comboBoxPorts->Items->Add(managedDisplayName); // для интерфейса
     }
 
     if (availablePorts->Count == 0)
@@ -670,6 +1248,7 @@ void ModbusMasterForm::ConnectToPort()
     buttonStartAutoUpdate->Enabled = true;
 
     labelStatus->Text = L"Статус: Подключен к " + comboBoxPorts->Text;
+    UpdateDeviceInfoLabels();
 }
 
 bool ModbusMasterForm::ConfigurePort()
@@ -689,6 +1268,7 @@ bool ModbusMasterForm::ConfigurePort()
     dcbSerialParams.ByteSize = byteSize;
     dcbSerialParams.StopBits = stopBits;
     dcbSerialParams.Parity = parity;
+
     dcbSerialParams.fOutxCtsFlow = FALSE;
     dcbSerialParams.fOutxDsrFlow = FALSE;
     dcbSerialParams.fDtrControl = DTR_CONTROL_DISABLE;
@@ -700,13 +1280,12 @@ bool ModbusMasterForm::ConfigurePort()
         return true;
     }
 
-    // Короткие таймауты для быстрой работы
     COMMTIMEOUTS timeouts = { 0 };
-    timeouts.ReadIntervalTimeout = 5;
-    timeouts.ReadTotalTimeoutMultiplier = 0;
-    timeouts.ReadTotalTimeoutConstant = 50;
-    timeouts.WriteTotalTimeoutMultiplier = 0;
-    timeouts.WriteTotalTimeoutConstant = 0;
+    timeouts.ReadIntervalTimeout = 10;
+    timeouts.ReadTotalTimeoutConstant = 120;
+    timeouts.ReadTotalTimeoutMultiplier = 2;
+    timeouts.WriteTotalTimeoutConstant = 100;
+    timeouts.WriteTotalTimeoutMultiplier = 1;
 
     if (!SetCommTimeouts(hSerial, &timeouts))
     {
@@ -714,15 +1293,24 @@ bool ModbusMasterForm::ConfigurePort()
         return true;
     }
 
-    SetupComm(hSerial, 4096, 4096);
     PurgeComm(hSerial, PURGE_RXCLEAR | PURGE_TXCLEAR);
 
-    LogMessage(L"Порт сконфигурирован: 9600 бод, 8 бит, 1 стоп-бит");
+    LogMessage(L"Порт сконфигурирован: 9600 бод, 8 бит данных, 1 стоп-бит, без контроля четности.");
     return false;
 }
 
 void ModbusMasterForm::DisconnectFromPort()
 {
+
+
+    if (pollTimer != nullptr)
+    {
+        pollTimer->Stop();
+    }
+
+    pollState = PollState::Idle;
+    isPollingInProgress = false;
+
     ClosePort();
 
     buttonConnect->Enabled = true;
@@ -743,11 +1331,8 @@ void ModbusMasterForm::DisconnectFromPort()
         labelAutoUpdateStatus->Text = L"Автообновление: выключено";
     }
 
-    currentState = PollState::IDLE;
-    if (pollTimer) pollTimer->Stop();
-    isPollingInProgress = false;
-
     labelStatus->Text = L"Статус: Отключен";
+    ClearDeviceInfoLabels();
     LogMessage(L"Отключен от порта.");
 }
 
@@ -811,6 +1396,18 @@ void ModbusMasterForm::ScanForDevices()
     std::vector<int> foundDevices;
     std::wstringstream result;
 
+    COMMTIMEOUTS originalTimeouts;
+    GetCommTimeouts(hSerial, &originalTimeouts);
+
+    COMMTIMEOUTS scanTimeouts;
+    scanTimeouts.ReadIntervalTimeout = 50;
+    scanTimeouts.ReadTotalTimeoutConstant = 100;
+    scanTimeouts.ReadTotalTimeoutMultiplier = 0;
+    scanTimeouts.WriteTotalTimeoutConstant = 100;
+    scanTimeouts.WriteTotalTimeoutMultiplier = 0;
+
+    SetCommTimeouts(hSerial, &scanTimeouts);
+
     std::vector<uint8_t> request;
     request.resize(8);
 
@@ -821,7 +1418,7 @@ void ModbusMasterForm::ScanForDevices()
         request[2] = 0x00;
         request[3] = 0x00;
         request[4] = 0x00;
-        request[5] = 0x01;
+        request[5] = 0x02;
 
         uint16_t crc = CalculateCRC16(request.data(), 6);
         request[6] = crc & 0xFF;
@@ -835,17 +1432,34 @@ void ModbusMasterForm::ScanForDevices()
             continue;
         }
 
-        Sleep(100);
-
         uint8_t response[256];
+        DWORD totalBytesRead = 0;
         DWORD bytesRead = 0;
-        ReadFile(hSerial, response, sizeof(response), &bytesRead, NULL);
+        DWORD startTime = GetTickCount();
 
-        if (bytesRead >= 5 && response[0] == slaveID && CheckCRC(response, bytesRead))
+        while (GetTickCount() - startTime < 200)
         {
-            foundDevices.push_back(slaveID);
-            LogMessage(L"Найдено устройство с ID: " + slaveID);
-            result << L"ID: " << slaveID << L"\r\n";
+            if (ReadFile(hSerial, response + totalBytesRead,
+                sizeof(response) - totalBytesRead, &bytesRead, NULL))
+            {
+                if (bytesRead > 0)
+                {
+                    totalBytesRead += bytesRead;
+
+                    if (totalBytesRead >= 5 && response[0] == slaveID)
+                    {
+                        if (CheckCRC(response, totalBytesRead))
+                        {
+                            foundDevices.push_back(slaveID);
+                            LogMessage(L"Найдено устройство с ID: " + slaveID);
+
+                            result << L"ID: " << slaveID << L"\r\n";
+                            break;
+                        }
+                    }
+                }
+            }
+            Sleep(10);
         }
 
         if (slaveID % 5 == 0)
@@ -856,6 +1470,8 @@ void ModbusMasterForm::ScanForDevices()
 
         Sleep(50);
     }
+
+    SetCommTimeouts(hSerial, &originalTimeouts);
 
     if (foundDevices.empty())
     {
@@ -873,208 +1489,164 @@ void ModbusMasterForm::ScanForDevices()
 }
 
 // ============================================================================
-// Конечный автомат опроса
+// Чтение регистров (ОСНОВНОЙ МЕТОД - САМЫЙ ВАЖНЫЙ)
 // ============================================================================
 
 void ModbusMasterForm::RefreshRegistersData()
 {
-    if (hSerial == INVALID_HANDLE_VALUE) return;
-    if (isPollingInProgress)
-    {
-        LogMessage(L"Опрос уже выполняется");
+    if (hSerial == INVALID_HANDLE_VALUE)
         return;
-    }
 
-    isPollingInProgress = true;
     allRegistersData->Clear();
-    currentState = PollState::SEND;
-    currentAddress = 0;
-    totalRegistersRead = 0;
-    pollStartTime = GetTickCount();
+    allRegistersRaw->Clear();
 
-    progressBar->Value = 0;
-    progressBar->Maximum = MAX_REGISTER_ADDRESS;
-
-    pollTimer->Start();
+    ScanAllRegisters();
+    UpdateRegistersData();
 }
 
-void ModbusMasterForm::OnPollTimerTick(Object^ sender, EventArgs^ e)
+void ModbusMasterForm::ScanAllRegisters()
 {
-    if (Monitor::TryEnter(portLock))
+    if (hSerial == INVALID_HANDLE_VALUE) return;
+
+    Monitor::Enter(portLock);
+
+    try
     {
-        try
+        const int BATCH_SIZE = 20;
+        const int MAX_REGISTER_ADDRESS = TOTAL_32BIT_VALUES;
+        const DWORD RESPONSE_TIMEOUT_MS = 250;
+
+        uint8_t slaveID = static_cast<uint8_t>(numericSlaveID->Value);
+
+        int startAddress = 0;
+
+        while (startAddress < MAX_REGISTER_ADDRESS)
         {
-            switch (currentState)
+            // Не даём батчу перейти через границу 256
+            int boundary = ((startAddress / 256) + 1) * 256;
+            int maxUntilBoundary = boundary - startAddress;
+
+            int currentBatchSize = min(BATCH_SIZE, MAX_REGISTER_ADDRESS - startAddress);
+            currentBatchSize = min(currentBatchSize, maxUntilBoundary);
+
+            std::vector<uint8_t> request;
+            request.reserve(8);
+            request.push_back(slaveID);
+            request.push_back(0x03);
+            request.push_back((startAddress >> 8) & 0xFF);
+            request.push_back(startAddress & 0xFF);
+            request.push_back((currentBatchSize >> 8) & 0xFF);
+            request.push_back(currentBatchSize & 0xFF);
+
+            uint16_t crc = CalculateCRC16(request.data(), request.size());
+            request.push_back(crc & 0xFF);
+            request.push_back((crc >> 8) & 0xFF);
+
+            PurgeComm(hSerial, PURGE_RXCLEAR);
+
+            DWORD bytesWritten = 0;
+            if (!WriteFile(hSerial, request.data(), (DWORD)request.size(), &bytesWritten, NULL) ||
+                bytesWritten != request.size())
             {
-            case PollState::SEND:
-                SendRequest();
-                break;
-
-            case PollState::WAIT:
-                waitCounter++;
-                if (waitCounter > MAX_WAIT_TICKS)
-                {
-                    LogMessage(String::Format(L"Таймаут для адреса {0}", currentAddress));
-                    currentState = PollState::NEXT;
-                }
-                else
-                {
-                    CheckResponse();
-                }
-                break;
-
-            case PollState::NEXT:
-                MoveToNext();
-                break;
-
-            case PollState::COMPLETE:
-                CompletePolling();
-                break;
-
-            default:
-                break;
+                startAddress += currentBatchSize;
+                continue;
             }
-        }
-        finally
-        {
-            Monitor::Exit(portLock);
-        }
-    }
-}
 
-void ModbusMasterForm::SendRequest()
-{
-    if (currentAddress >= MAX_REGISTER_ADDRESS)
-    {
-        currentState = PollState::COMPLETE;
-        return;
-    }
+            uint8_t response[256] = { 0 };
+            DWORD totalBytesRead = 0;
+            DWORD bytesRead = 0;
+            DWORD startTime = GetTickCount();
+            bool frameComplete = false;
 
-    uint8_t slaveID = static_cast<uint8_t>(numericSlaveID->Value);
-    currentBatchSize = min(BATCH_SIZE, MAX_REGISTER_ADDRESS - currentAddress);
+            while ((GetTickCount() - startTime) < RESPONSE_TIMEOUT_MS)
+            {
+                if (ReadFile(hSerial,
+                    response + totalBytesRead,
+                    sizeof(response) - totalBytesRead,
+                    &bytesRead,
+                    NULL))
+                {
+                    if (bytesRead > 0)
+                    {
+                        totalBytesRead += bytesRead;
 
-    // Обновляем прогресс
-    UpdateProgress(currentAddress);
+                        if (totalBytesRead >= 3 &&
+                            response[0] == slaveID &&
+                            response[1] == 0x03)
+                        {
+                            int expectedLength = response[2] + 5;
 
-    // Формируем запрос
-    for (int i = 0; i < writeBuffer->Length; i++) writeBuffer[i] = 0;
+                            if (totalBytesRead >= static_cast<DWORD>(expectedLength))
+                            {
+                                totalBytesRead = expectedLength;
+                                frameComplete = true;
+                                break;
+                            }
+                        }
+                    }
+                }
 
-    writeBuffer[0] = slaveID;
-    writeBuffer[1] = 0x03;
-    writeBuffer[2] = (currentAddress >> 8) & 0xFF;
-    writeBuffer[3] = currentAddress & 0xFF;
-    writeBuffer[4] = (currentBatchSize >> 8) & 0xFF;
-    writeBuffer[5] = currentBatchSize & 0xFF;
+                Sleep(1);
+            }
 
-    pin_ptr<unsigned char> pWriteBuffer = &writeBuffer[0];
-    uint16_t crc = CalculateCRC16(pWriteBuffer, 6);
-    writeBuffer[6] = crc & 0xFF;
-    writeBuffer[7] = (crc >> 8) & 0xFF;
+            if (!frameComplete)
+            {
+                startAddress += currentBatchSize;
+                continue;
+            }
 
-    // Отправка
-    DWORD bytesWritten = 0;
-    if (!WriteFile(hSerial, pWriteBuffer, 8, &bytesWritten, NULL))
-    {
-        LogMessage(String::Format(L"Ошибка отправки для адреса {0}", currentAddress));
-        currentState = PollState::NEXT;
-        return;
-    }
+            if (!CheckCRC(response, totalBytesRead))
+            {
+                startAddress += currentBatchSize;
+                continue;
+            }
 
-    // Очищаем буфер чтения
-    PurgeComm(hSerial, PURGE_RXCLEAR);
+            uint8_t dataLength = response[2];
+            int expectedDataLength = currentBatchSize * 4;
 
-    currentState = PollState::WAIT;
-    waitCounter = 0;
-}
+            if (dataLength != expectedDataLength)
+            {
+                LogMessage(String::Format(
+                    L"SHORT SCAN BATCH: start={0}, requestedRegs={1}, expectedBytes={2}, gotBytes={3}",
+                    startAddress,
+                    currentBatchSize,
+                    expectedDataLength,
+                    dataLength));
 
-void ModbusMasterForm::CheckResponse()
-{
-    DWORD errors = 0;
-    COMSTAT comStat = { 0 };
-    ClearCommError(hSerial, &errors, &comStat);
+                startAddress += currentBatchSize;
+                continue;
+            }
 
-    if (comStat.cbInQue == 0) return;
+            int registerCount = dataLength / 4;
 
-    // Ожидаемый размер ответа: 3 + (BATCH_SIZE * 2) + 2 = 3 + 40 + 2 = 45 байт
-    int expectedSize = 3 + (currentBatchSize * 2) + 2;
+            for (int i = 0; i < registerCount; i++)
+            {
+                int logicalReg = startAddress + i;
 
-    if (comStat.cbInQue < expectedSize) return;  // Ждем полный ответ
+                System::UInt32 raw =
+                    ((System::UInt32)response[3 + i * 4]) |
+                    ((System::UInt32)response[4 + i * 4] << 8) |
+                    ((System::UInt32)response[5 + i * 4] << 16) |
+                    ((System::UInt32)response[6 + i * 4] << 24);
 
-    // Читаем все данные сразу
-    DWORD bytesRead = 0;
-    pin_ptr<unsigned char> pReadBuffer = &readBuffer[0];
+                float floatValue = ConvertToFloat(static_cast<uint32_t>(raw));
+                int32_t intValue = static_cast<int32_t>(raw);
 
-    if (!ReadFile(hSerial, pReadBuffer, expectedSize, &bytesRead, NULL))
-    {
-        currentState = PollState::NEXT;
-        return;
-    }
+                allRegistersRaw[logicalReg] = raw;
+                allRegistersData[logicalReg] = Tuple::Create(floatValue, intValue);
+            }
 
-    if (bytesRead < expectedSize) return;
-
-    // Проверяем CRC
-    if (!CheckCRC(pReadBuffer, bytesRead))
-    {
-        currentState = PollState::NEXT;
-        return;
-    }
-
-    if (readBuffer[1] == 0x03)
-    {
-        uint8_t dataLength = readBuffer[2];
-        int registerCount = dataLength / 2;
-
-        for (int i = 0; i < registerCount; i++)
-        {
-            int physicalAddress = currentAddress + i;
-            if (physicalAddress >= MAX_REGISTER_ADDRESS) break;
-
-            uint16_t value16 = BytesToUInt16(readBuffer, 3 + i * 2);
-
-            allRegistersData[physicalAddress] = Tuple::Create(
-                static_cast<float>(value16),
-                static_cast<int32_t>(value16)
-            );
-
-            totalRegistersRead++;
+            startAddress += currentBatchSize;
         }
     }
-
-    currentState = PollState::NEXT;
-}
-
-void ModbusMasterForm::MoveToNext()
-{
-    currentAddress += currentBatchSize;
-    currentState = PollState::SEND;
-}
-
-void ModbusMasterForm::CompletePolling()
-{
-    pollTimer->Stop();
-    isPollingInProgress = false;
-
-    DWORD elapsed = (GetTickCount() - pollStartTime) / 1000;
-    LogMessage(String::Format(L"Опрос завершен за {0} сек. Прочитано регистров: {1}",
-        elapsed, totalRegistersRead));
-
-    progressBar->Value = MAX_REGISTER_ADDRESS;
-
-    this->BeginInvoke(gcnew Action(this, &ModbusMasterForm::UpdateRegistersData));
-}
-
-void ModbusMasterForm::UpdateProgress(int value)
-{
-    if (progressBar->InvokeRequired)
+    finally
     {
-        progressBar->BeginInvoke(gcnew Action<int>(this, &ModbusMasterForm::UpdateProgress), value);
-        return;
+        Monitor::Exit(portLock);
     }
-    progressBar->Value = value;
 }
 
 // ============================================================================
-// Обновление таблиц (ПРАВИЛЬНОЕ ОТОБРАЖЕНИЕ - 1 регистр = 1 строка)
+// Обновление таблиц
 // ============================================================================
 
 void ModbusMasterForm::UpdateRegistersData()
@@ -1093,55 +1665,168 @@ void ModbusMasterForm::UpdateFullRegistersTable()
     if (isUpdatingTables) return;
     isUpdatingTables = true;
 
-    int firstDisplayedScrollRow = 0;
-    if (dataGridViewRegisters->FirstDisplayedScrollingRowIndex >= 0)
-        firstDisplayedScrollRow = dataGridViewRegisters->FirstDisplayedScrollingRowIndex;
+    dataGridViewRegisters->SuspendLayout();
 
-    dataGridViewRegisters->Rows->Clear();
-    dataGridViewRegisters->Columns->Clear();
-
-    // Правильные колонки: адрес, HEX, DEC
-    dataGridViewRegisters->Columns->Add(L"Address", L"Адрес");
-    dataGridViewRegisters->Columns->Add(L"ValueHex", L"Значение (hex)");
-    dataGridViewRegisters->Columns->Add(L"ValueDec", L"Значение (dec)");
-
-    dataGridViewRegisters->Columns[0]->Width = 120;
-    dataGridViewRegisters->Columns[1]->Width = 120;
-    dataGridViewRegisters->Columns[2]->Width = 120;
-
-    // Сортируем адреса
-    List<int>^ addresses = gcnew List<int>(allRegistersData->Keys);
-    addresses->Sort();
-
-    for each (int address in addresses)
+    try
     {
-        int value = allRegistersData[address]->Item2;
-
-        // ПРАВИЛЬНО: один адрес = одна строка (не диапазон!)
-        String^ addrStr = String::Format(L"{0} (0x{1:X4})", address, address);
-        String^ hexStr = String::Format(L"0x{0:X4}", value & 0xFFFF);
-
-        DataGridViewRow^ row = gcnew DataGridViewRow();
-        row->CreateCells(dataGridViewRegisters);
-        row->Cells[0]->Value = addrStr;
-        row->Cells[1]->Value = hexStr;
-        row->Cells[2]->Value = value.ToString();
-
-        if (IsRegisterChanged(address))
+        // -----------------------------
+        // Сохраняем вертикальную позицию
+        // -----------------------------
+        int topVisibleReg = -1;
+        if (dataGridViewRegisters->FirstDisplayedScrollingRowIndex >= 0 &&
+            dataGridViewRegisters->Rows->Count > 0)
         {
-            row->DefaultCellStyle->BackColor = Color::LightYellow;
+            int topRow = dataGridViewRegisters->FirstDisplayedScrollingRowIndex;
+            Object^ topCell = dataGridViewRegisters->Rows[topRow]->Cells[0]->Value;
+
+            if (topCell != nullptr)
+            {
+                String^ addrStr = topCell->ToString();
+                if (addrStr->StartsWith(L"Reg"))
+                {
+                    topVisibleReg = Int32::Parse(addrStr->Substring(3));
+                }
+            }
         }
 
-        dataGridViewRegisters->Rows->Add(row);
-    }
+        // -----------------------------
+        // Сохраняем выбранную строку
+        // -----------------------------
+        int selectedReg = -1;
+        if (dataGridViewRegisters->CurrentRow != nullptr &&
+            dataGridViewRegisters->CurrentRow->Cells[0]->Value != nullptr)
+        {
+            String^ addrStr = dataGridViewRegisters->CurrentRow->Cells[0]->Value->ToString();
+            if (addrStr->StartsWith(L"Reg"))
+            {
+                selectedReg = Int32::Parse(addrStr->Substring(3));
+            }
+        }
 
-    if (firstDisplayedScrollRow > 0 && firstDisplayedScrollRow < dataGridViewRegisters->Rows->Count)
+        // -----------------------------
+        // Сохраняем горизонтальную позицию
+        // -----------------------------
+        int firstDisplayedColumn = -1;
+        int horizontalOffset = 0;
+
+        if (dataGridViewRegisters->Columns->Count > 0)
+        {
+            try
+            {
+                firstDisplayedColumn = dataGridViewRegisters->FirstDisplayedScrollingColumnIndex;
+            }
+            catch (...) {}
+
+            try
+            {
+                horizontalOffset = dataGridViewRegisters->HorizontalScrollingOffset;
+            }
+            catch (...) {}
+        }
+
+        // -----------------------------
+        // Обновляем только строки
+        // -----------------------------
+        dataGridViewRegisters->Rows->Clear();
+
+        List<int>^ addresses = gcnew List<int>(allRegistersData->Keys);
+        addresses->Sort();
+
+        for each (int address in addresses)
+        {
+            float floatValue = allRegistersData[address]->Item1;
+            int32_t intValue = allRegistersData[address]->Item2;
+            System::UInt32 rawValue = allRegistersRaw->ContainsKey(address) ? allRegistersRaw[address] : 0;
+
+            if (IsRegisterChanged(address))
+            {
+                rawValue = changedRegistersValues[address];
+                floatValue = changedRegistersFloats[address];
+                intValue = static_cast<int32_t>(rawValue);
+            }
+
+            String^ hexStr = String::Format(L"0x{0:X8}", rawValue);
+            String^ addrStr = String::Format(L"Reg{0}", address);
+
+            int rowIndex = dataGridViewRegisters->Rows->Add(
+                addrStr,
+                hexStr,
+                intValue.ToString(),
+                floatValue.ToString(L"F6"));
+
+            if (IsRegisterChanged(address))
+            {
+                dataGridViewRegisters->Rows[rowIndex]->DefaultCellStyle->BackColor = Color::LightYellow;
+            }
+        }
+
+        // -----------------------------
+        // Восстанавливаем верхнюю строку
+        // -----------------------------
+        if (topVisibleReg >= 0)
+        {
+            for (int i = 0; i < dataGridViewRegisters->Rows->Count; i++)
+            {
+                Object^ cellValue = dataGridViewRegisters->Rows[i]->Cells[0]->Value;
+                if (cellValue != nullptr &&
+                    cellValue->ToString() == String::Format(L"Reg{0}", topVisibleReg))
+                {
+                    try
+                    {
+                        dataGridViewRegisters->FirstDisplayedScrollingRowIndex = i;
+                    }
+                    catch (...) {}
+                    break;
+                }
+            }
+        }
+
+        // -----------------------------
+        // Восстанавливаем выбранную строку
+        // -----------------------------
+        if (selectedReg >= 0)
+        {
+            for (int i = 0; i < dataGridViewRegisters->Rows->Count; i++)
+            {
+                Object^ cellValue = dataGridViewRegisters->Rows[i]->Cells[0]->Value;
+                if (cellValue != nullptr &&
+                    cellValue->ToString() == String::Format(L"Reg{0}", selectedReg))
+                {
+                    dataGridViewRegisters->Rows[i]->Selected = true;
+
+                    if (dataGridViewRegisters->Rows[i]->Cells->Count > 0)
+                    {
+                        dataGridViewRegisters->CurrentCell = dataGridViewRegisters->Rows[i]->Cells[0];
+                    }
+                    break;
+                }
+            }
+        }
+
+        // -----------------------------
+        // Восстанавливаем горизонтальную позицию
+        // -----------------------------
+        if (firstDisplayedColumn >= 0 &&
+            firstDisplayedColumn < dataGridViewRegisters->Columns->Count)
+        {
+            try
+            {
+                dataGridViewRegisters->FirstDisplayedScrollingColumnIndex = firstDisplayedColumn;
+            }
+            catch (...) {}
+        }
+
+        try
+        {
+            dataGridViewRegisters->HorizontalScrollingOffset = horizontalOffset;
+        }
+        catch (...) {}
+    }
+    finally
     {
-        dataGridViewRegisters->FirstDisplayedScrollingRowIndex = firstDisplayedScrollRow;
+        dataGridViewRegisters->ResumeLayout();
+        isUpdatingTables = false;
     }
-
-    dataGridViewRegisters->AutoResizeColumns(DataGridViewAutoSizeColumnsMode::AllCells);
-    isUpdatingTables = false;
 }
 
 void ModbusMasterForm::UpdateParametersTable()
@@ -1149,65 +1834,163 @@ void ModbusMasterForm::UpdateParametersTable()
     if (isUpdatingTables) return;
     isUpdatingTables = true;
 
-    dataGridViewParameters->Rows->Clear();
-    dataGridViewParameters->Columns->Clear();
-    dataGridViewParameters->Columns->Add(L"DateTime", L"Дата/Время");
-    dataGridViewParameters->Columns->Add(L"Parameter", L"Параметр");
-    dataGridViewParameters->Columns->Add(L"Address", L"Адрес");
-    dataGridViewParameters->Columns->Add(L"Value", L"Значение");
-    dataGridViewParameters->Columns->Add(L"Unit", L"Ед. изм.");
+    dataGridViewParameters->SuspendLayout();
 
-    dataGridViewParameters->Columns[0]->Width = 120;
-    dataGridViewParameters->Columns[1]->Width = 100;
-    dataGridViewParameters->Columns[2]->Width = 80;
-    dataGridViewParameters->Columns[3]->Width = 100;
-    dataGridViewParameters->Columns[4]->Width = 80;
-    dataGridViewParameters->ReadOnly = true;
-
-    String^ currentTime = DateTime::Now.ToString(L"dd.MM.yyyy HH:mm:ss");
-
-    for (int i = 0; i < paramNames->Count; i++)
+    try
     {
-        int value = 0;
-        int physicalAddress = paramAddresses[i];
-
-        if (allRegistersData != nullptr && allRegistersData->ContainsKey(physicalAddress))
+        int topVisibleRow = -1;
+        if (dataGridViewParameters->FirstDisplayedScrollingRowIndex >= 0 &&
+            dataGridViewParameters->Rows->Count > 0)
         {
-            value = allRegistersData[physicalAddress]->Item2;
+            topVisibleRow = dataGridViewParameters->FirstDisplayedScrollingRowIndex;
         }
 
-        String^ addrStr = String::Format(L"{0} (0x{1:X4})", physicalAddress, physicalAddress);
-        String^ valueStr = value.ToString();
-
-        int rowIndex = dataGridViewParameters->Rows->Add(
-            currentTime, paramNames[i], addrStr, valueStr, paramUnits[i]);
-
-        if (IsRegisterChanged(physicalAddress))
+        int selectedRow = -1;
+        if (dataGridViewParameters->CurrentRow != nullptr)
         {
-            dataGridViewParameters->Rows[rowIndex]->DefaultCellStyle->BackColor = Color::LightYellow;
+            selectedRow = dataGridViewParameters->CurrentRow->Index;
         }
+
+        int firstDisplayedColumn = -1;
+        int horizontalOffset = 0;
+
+        if (dataGridViewParameters->Columns->Count > 0)
+        {
+            try
+            {
+                firstDisplayedColumn = dataGridViewParameters->FirstDisplayedScrollingColumnIndex;
+            }
+            catch (...) {}
+
+            try
+            {
+                horizontalOffset = dataGridViewParameters->HorizontalScrollingOffset;
+            }
+            catch (...) {}
+        }
+
+        dataGridViewParameters->Rows->Clear();
+
+        String^ currentTime = DateTime::Now.ToString(L"dd.MM.yyyy HH:mm:ss");
+
+        for (int i = 0; i < paramNames->Count; i++)
+        {
+            float value = 0.0f;
+            int physicalAddress = paramAddresses[i];
+
+            if (IsRegisterChanged(physicalAddress))
+            {
+                value = changedRegistersFloats[physicalAddress];
+            }
+            else if (allRegistersData != nullptr && allRegistersData->ContainsKey(physicalAddress))
+            {
+                value = allRegistersData[physicalAddress]->Item1;
+            }
+
+            String^ addrStr = String::Format(L"Reg{0}", physicalAddress);
+
+            String^ valueStr;
+            if (paramUnits[i] == L"°C" || paramUnits[i] == L"кг/м³" || paramUnits[i] == L"В")
+                valueStr = value.ToString(L"F3");
+            else if (paramUnits[i] == L"мкс")
+                valueStr = value.ToString(L"F0");
+            else
+                valueStr = value.ToString(L"F6");
+
+            int rowIndex = dataGridViewParameters->Rows->Add(
+                currentTime,
+                paramNames[i],
+                addrStr,
+                valueStr,
+                paramUnits[i]);
+
+            if (IsRegisterChanged(physicalAddress))
+            {
+                dataGridViewParameters->Rows[rowIndex]->DefaultCellStyle->BackColor = Color::LightYellow;
+            }
+        }
+
+        if (topVisibleRow >= 0 && topVisibleRow < dataGridViewParameters->Rows->Count)
+        {
+            try
+            {
+                dataGridViewParameters->FirstDisplayedScrollingRowIndex = topVisibleRow;
+            }
+            catch (...) {}
+        }
+
+        if (selectedRow >= 0 && selectedRow < dataGridViewParameters->Rows->Count)
+        {
+            try
+            {
+                dataGridViewParameters->Rows[selectedRow]->Selected = true;
+
+                if (dataGridViewParameters->Rows[selectedRow]->Cells->Count > 0)
+                {
+                    dataGridViewParameters->CurrentCell =
+                        dataGridViewParameters->Rows[selectedRow]->Cells[0];
+                }
+            }
+            catch (...) {}
+        }
+
+        if (firstDisplayedColumn >= 0 &&
+            firstDisplayedColumn < dataGridViewParameters->Columns->Count)
+        {
+            try
+            {
+                dataGridViewParameters->FirstDisplayedScrollingColumnIndex = firstDisplayedColumn;
+            }
+            catch (...) {}
+        }
+
+        try
+        {
+            dataGridViewParameters->HorizontalScrollingOffset = horizontalOffset;
+        }
+        catch (...) {}
     }
-
-    dataGridViewParameters->AutoResizeColumns(DataGridViewAutoSizeColumnsMode::AllCells);
-    isUpdatingTables = false;
+    finally
+    {
+        dataGridViewParameters->ResumeLayout();
+        isUpdatingTables = false;
+    }
 }
 
 void ModbusMasterForm::CollapseRegistersPanel()
 {
-    groupBoxRegisters->Height = 50;
-    dataGridViewRegisters->Visible = false;
-    groupBoxRegisters->Text = L"Все регистры [СВЕРНУТО]";
-    buttonToggleRegisters->Text = L"Развернуть таблицу регистров";
-    isRegistersPanelExpanded = false;
+    groupBoxRegisters->Height = 475;
+    dataGridViewRegisters->Visible = true;
+    groupBoxRegisters->Text = L"Все регистры (32-битные значения)";
+    isRegistersPanelExpanded = true;
+    groupBoxParameters->Height = 170;
 }
 
 void ModbusMasterForm::ExpandRegistersPanel()
 {
     groupBoxRegisters->Height = 475;
     dataGridViewRegisters->Visible = true;
-    groupBoxRegisters->Text = L"Все регистры [РАЗВЕРНУТО]";
-    buttonToggleRegisters->Text = L"Свернуть таблицу регистров";
+    groupBoxRegisters->Text = L"Все регистры (32-битные значения)";
     isRegistersPanelExpanded = true;
+    groupBoxParameters->Height = 170;
+}
+
+void ModbusMasterForm::UpdateLiveValuesPanel()
+{
+    if (allRegistersData != nullptr && allRegistersData->ContainsKey(257))
+        textBoxLiveDensity->Text = allRegistersData[257]->Item1.ToString(L"F3") + L" кг/м³";
+    else
+        textBoxLiveDensity->Text = L"-";
+
+    if (allRegistersData != nullptr && allRegistersData->ContainsKey(259))
+        textBoxLiveTemperature->Text = allRegistersData[259]->Item1.ToString(L"F3") + L" °C";
+    else
+        textBoxLiveTemperature->Text = L"-";
+
+    if (allRegistersData != nullptr && allRegistersData->ContainsKey(264))
+        textBoxLiveUout->Text = allRegistersData[264]->Item1.ToString(L"F3") + L" В";
+    else
+        textBoxLiveUout->Text = L"-";
 }
 
 // ============================================================================
@@ -1232,13 +2015,112 @@ void ModbusMasterForm::ClearChangedRegisters()
     changedRegistersFloats->Clear();
     buttonSendChanges->Enabled = false;
 }
+void ModbusMasterForm::PauseAutoUpdateForEditing()
+{
+    if (isRegisterCellEditing)
+        return;
 
+    isRegisterCellEditing = true;
+
+    if (isAutoUpdating)
+    {
+        resumeAutoUpdateAfterEdit = true;
+        isAutoUpdating = false;
+        updateTimer->Stop();
+
+        labelAutoUpdateStatus->Text = L"Автообновление: пауза (редактирование)";
+        buttonStartAutoUpdate->Enabled = true;
+        buttonStopAutoUpdate->Enabled = false;
+    }
+    else
+    {
+        resumeAutoUpdateAfterEdit = false;
+    }
+}
+
+void ModbusMasterForm::ResumeAutoUpdateAfterEditing()
+{
+    isRegisterCellEditing = false;
+
+    if (pendingUiRefreshAfterEdit)
+    {
+        pendingUiRefreshAfterEdit = false;
+        UpdateRegistersData();
+    }
+
+    if (resumeAutoUpdateAfterEdit && hSerial != INVALID_HANDLE_VALUE)
+    {
+        isAutoUpdating = true;
+        updateTimer->Start();
+
+        buttonStartAutoUpdate->Enabled = false;
+        buttonStopAutoUpdate->Enabled = true;
+
+        if (lastUpdateTime != DateTime())
+        {
+            labelAutoUpdateStatus->Text =
+                String::Format(L"Автообновление: активно (последнее: {0:HH:mm:ss})", lastUpdateTime);
+        }
+        else
+        {
+            labelAutoUpdateStatus->Text = L"Автообновление: активно";
+        }
+    }
+
+    resumeAutoUpdateAfterEdit = false;
+}
+void ModbusMasterForm::dataGridViewRegisters_CellBeginEdit(
+    System::Object^ sender,
+    System::Windows::Forms::DataGridViewCellCancelEventArgs^ e)
+{
+    if (e->RowIndex < 0)
+        return;
+
+    // Разрешаем паузу только при редактировании значений int32/float
+    if (e->ColumnIndex == 2 || e->ColumnIndex == 3)
+    {
+        PauseAutoUpdateForEditing();
+    }
+}
+
+void ModbusMasterForm::dataGridViewRegisters_CellEndEdit(
+    System::Object^ sender,
+    System::Windows::Forms::DataGridViewCellEventArgs^ e)
+{
+    if (e->RowIndex < 0)
+        return;
+
+    if (e->ColumnIndex == 2 || e->ColumnIndex == 3)
+    {
+        ResumeAutoUpdateAfterEditing();
+    }
+}
 // ============================================================================
 // Запись регистров
 // ============================================================================
 
 void ModbusMasterForm::WriteRegisters()
 {
+    if (isPollingInProgress)
+    {
+        LogMessage(L"Запись отменена: идёт опрос устройства.");
+        return;
+    }
+
+    bool wasAutoUpdating = isAutoUpdating;
+
+    if (isAutoUpdating)
+    {
+        isAutoUpdating = false;
+        updateTimer->Stop();
+    }
+
+    if (pollTimer != nullptr)
+        pollTimer->Stop();
+
+    pollState = PollState::Idle;
+    isPollingInProgress = false;
+
     if (hSerial == INVALID_HANDLE_VALUE) return;
 
     Monitor::Enter(portLock);
@@ -1258,72 +2140,171 @@ void ModbusMasterForm::WriteRegisters()
             uint32_t newValue = kvp.Value;
             float newFloatValue = changedRegistersFloats[registerAddress];
 
-            array<unsigned char>^ request = gcnew array<unsigned char>(8);
-            request[0] = slaveID;
-            request[1] = 0x06;  // Write Single Register
-            request[2] = (registerAddress >> 8) & 0xFF;
-            request[3] = registerAddress & 0xFF;
-            request[4] = (newValue >> 8) & 0xFF;
-            request[5] = newValue & 0xFF;
+            uint16_t startAddress = static_cast<uint16_t>(registerAddress);
+            uint16_t registerCount = 2;
+            std::vector<uint8_t> request;
+            request.push_back(slaveID);
+            request.push_back(0x10);  // Write Multiple Registers
+            request.push_back((startAddress >> 8) & 0xFF);
+            request.push_back(startAddress & 0xFF);
+            request.push_back((registerCount >> 8) & 0xFF);
+            request.push_back(registerCount & 0xFF);
+            request.push_back(4);
 
-            pin_ptr<unsigned char> pRequest = &request[0];
-            uint16_t crc = CalculateCRC16(pRequest, 6);
-            request[6] = crc & 0xFF;
-            request[7] = (crc >> 8) & 0xFF;
 
+            request.push_back(newValue & 0xFF);
+            request.push_back((newValue >> 8) & 0xFF);
+            request.push_back((newValue >> 16) & 0xFF);
+            request.push_back((newValue >> 24) & 0xFF);
+
+            uint16_t crc = CalculateCRC16(request.data(), request.size());
+            request.push_back(crc & 0xFF);
+            request.push_back((crc >> 8) & 0xFF);
+            PurgeComm(hSerial, PURGE_RXCLEAR);
             DWORD bytesWritten;
-            if (!WriteFile(hSerial, pRequest, 8, &bytesWritten, NULL))
+            LogMessage(L"TX(0x10): " + BytesToHex(request.data(), (int)request.size()));
+            if (!WriteFile(hSerial, request.data(), (DWORD)request.size(), &bytesWritten, NULL))
             {
-                LogMessage(String::Format(L"Ошибка отправки для регистра {0}", registerAddress));
+                LogMessage(String::Format(L"Ошибка отправки запроса для регистра {0}", registerAddress));
                 failCount++;
                 continue;
             }
 
-            Sleep(100);
+            Sleep(50);
 
             uint8_t response[256];
+            DWORD totalBytesRead = 0;
             DWORD bytesRead = 0;
-            ReadFile(hSerial, response, sizeof(response), &bytesRead, NULL);
+            DWORD startTime = GetTickCount();
 
-            if (bytesRead >= 8 && CheckCRC(response, bytesRead) && response[1] == 0x06)
+            while ((GetTickCount() - startTime) < 300)
             {
-                LogMessage(String::Format(L"Регистр {0} успешно записан (значение: {1})",
-                    registerAddress, newFloatValue));
-                successCount++;
+                if (ReadFile(hSerial, response + totalBytesRead,
+                    sizeof(response) - totalBytesRead, &bytesRead, NULL) && bytesRead > 0)
+                {
+                    totalBytesRead += bytesRead;
+                    if (totalBytesRead >= 8 && response[1] == 0x10) break;
+                }
+                Sleep(5);
+            }
+
+            if (totalBytesRead >= 5 &&
+                response[0] == slaveID &&
+                response[1] == (0x10 | 0x80))
+            {
+                if (CheckCRC(response, 5))
+                {
+                    System::Byte exCode = response[2];
+                    LogMessage(String::Format(
+                        L"Ошибка записи регистра {0}: exception 0x{1:X2}",
+                        registerAddress, exCode));
+                }
+                else
+                {
+                    LogMessage(String::Format(
+                        L"Ошибка записи регистра {0}: битый exception response",
+                        registerAddress));
+                }
+
+                failCount++;
+            }
+            else if (totalBytesRead >= 8 &&
+                response[0] == slaveID &&
+                response[1] == 0x10 &&
+                CheckCRC(response, 8))
+            {
+                uint16_t respAddr =
+                    ((uint16_t)response[2] << 8) | response[3];
+
+                uint16_t respCount =
+                    ((uint16_t)response[4] << 8) | response[5];
+
+                if (respAddr == startAddress && respCount == registerCount)
+                {
+                    LogMessage(String::Format(
+                        L"Регистр {0} успешно записан (значение: {1})",
+                        registerAddress, newFloatValue));
+                    successCount++;
+                }
+                else
+                {
+                    LogMessage(String::Format(
+                        L"Ошибка записи регистра {0}: ответ не совпал по адресу/количеству",
+                        registerAddress));
+                    failCount++;
+                }
             }
             else
             {
-                LogMessage(String::Format(L"Ошибка записи регистра {0}", registerAddress));
+                LogMessage(String::Format(
+                    L"Ошибка записи регистра {0}: нет корректного ответа",
+                    registerAddress));
                 failCount++;
             }
+            System::UInt32 verifyRaw = 0;
+            System::Int32 verifyInt = 0;
+            float verifyFloat = 0.0f;
 
-            Sleep(50);
+            if (ReadLogicalReg32(registerAddress, verifyRaw, verifyInt, verifyFloat))
+            {
+                if (verifyRaw == newValue)
+                {
+                    LogMessage(String::Format(
+                        L"Проверка записи Reg{0}: OK, raw=0x{1:X8}",
+                        registerAddress, verifyRaw));
+                }
+                else
+                {
+                    LogMessage(String::Format(
+                        L"Проверка записи Reg{0}: MISMATCH, записали 0x{1:X8}, прочитали 0x{2:X8}",
+                        registerAddress, newValue, verifyRaw));
+                }
+            }
+            else
+            {
+                LogMessage(String::Format(
+                    L"Проверка записи Reg{0}: не удалось перечитать",
+                    registerAddress));
+            }
+            Sleep(20);
+            if (totalBytesRead > 0)
+            {
+                LogMessage(L"RX(0x10): " + BytesToHex(response, totalBytesRead));
+            }
         }
 
         LogMessage(String::Format(L"Запись завершена. Успешно: {0}, Ошибок: {1}",
             successCount, failCount));
+
     }
     finally
     {
         Monitor::Exit(portLock);
     }
+    if (wasAutoUpdating)
+    {
+        isAutoUpdating = true;
+        updateTimer->Start();
+    }
+}
+
+String^ ModbusMasterForm::BytesToHex(const uint8_t* data, int length)
+{
+    System::Text::StringBuilder^ sb = gcnew System::Text::StringBuilder();
+
+    for (int i = 0; i < length; i++)
+    {
+        sb->AppendFormat(L"{0:X2}", data[i]);
+        if (i < length - 1)
+            sb->Append(L" ");
+    }
+
+    return sb->ToString();
 }
 
 // ============================================================================
 // Обработчики событий кнопок
 // ============================================================================
-
-void ModbusMasterForm::OnUpdateTimerTick(Object^ sender, EventArgs^ e)
-{
-    if (!isAutoUpdating) return;
-    if (isPollingInProgress) return;
-
-    lastUpdateTime = DateTime::Now;
-    labelAutoUpdateStatus->Text = String::Format(
-        L"Автообновление: активно (последнее: {0:HH:mm:ss})", lastUpdateTime);
-
-    RefreshRegistersData();
-}
 
 void ModbusMasterForm::buttonRefresh_Click(System::Object^ sender, System::EventArgs^ e)
 {
@@ -1352,37 +2333,40 @@ void ModbusMasterForm::buttonClearLog_Click(System::Object^ sender, System::Even
 
 void ModbusMasterForm::buttonRefreshRegisters_Click(System::Object^ sender, EventArgs^ e)
 {
-    if (hSerial != INVALID_HANDLE_VALUE)
-    {
-        if (!isPollingInProgress)
-        {
-            RefreshRegistersData();
-        }
-        else
-        {
-            LogMessage(L"Опрос уже выполняется, подождите...");
-        }
-    }
-    else
+    if (hSerial == INVALID_HANDLE_VALUE)
     {
         MessageBox::Show(L"Порт не подключен!", L"Ошибка", MessageBoxButtons::OK, MessageBoxIcon::Warning);
+        return;
     }
-}
 
+    if (isPollingInProgress)
+    {
+        LogMessage(L"Опрос уже выполняется, подождите...");
+        return;
+    }
+
+    StartPollingCycle();
+}
 void ModbusMasterForm::buttonStartAutoUpdate_Click(Object^ sender, EventArgs^ e)
 {
-    if (hSerial != INVALID_HANDLE_VALUE)
+    if (hSerial == INVALID_HANDLE_VALUE)
     {
-        isAutoUpdating = true;
-        updateTimer->Start();
-        buttonStartAutoUpdate->Enabled = false;
-        buttonStopAutoUpdate->Enabled = true;
-        labelAutoUpdateStatus->Text = L"Автообновление: активно (обновление каждые 4 сек)";
-        RefreshRegistersData();
+        MessageBox::Show(L"Порт не подключен!", L"Ошибка",
+            MessageBoxButtons::OK, MessageBoxIcon::Warning);
+        return;
     }
-    else
+
+    isAutoUpdating = true;
+    updateTimer->Start();
+
+    buttonStartAutoUpdate->Enabled = false;
+    buttonStopAutoUpdate->Enabled = true;
+
+    labelAutoUpdateStatus->Text = L"Автообновление: активно";
+
+    if (!isPollingInProgress)
     {
-        MessageBox::Show(L"Порт не подключен!", L"Ошибка", MessageBoxButtons::OK, MessageBoxIcon::Warning);
+        StartPollingCycle();
     }
 }
 
@@ -1390,17 +2374,18 @@ void ModbusMasterForm::buttonStopAutoUpdate_Click(Object^ sender, EventArgs^ e)
 {
     isAutoUpdating = false;
     updateTimer->Stop();
+
+    if (pollTimer != nullptr)
+    {
+        pollTimer->Stop();
+    }
+
+    pollState = PollState::Idle;
+    isPollingInProgress = false;
+
     buttonStartAutoUpdate->Enabled = true;
     buttonStopAutoUpdate->Enabled = false;
     labelAutoUpdateStatus->Text = L"Автообновление: выключено";
-}
-
-void ModbusMasterForm::buttonToggleRegisters_Click(Object^ sender, EventArgs^ e)
-{
-    if (isRegistersPanelExpanded)
-        CollapseRegistersPanel();
-    else
-        ExpandRegistersPanel();
 }
 
 void ModbusMasterForm::buttonSendChanges_Click(System::Object^ sender, EventArgs^ e)
@@ -1510,23 +2495,40 @@ void ModbusMasterForm::buttonExport_Click(Object^ sender, EventArgs^ e)
 
 void ModbusMasterForm::dataGridViewRegisters_CellValueChanged(Object^ sender, DataGridViewCellEventArgs^ e)
 {
-    if (e->RowIndex >= 0 && e->ColumnIndex == 2)
+    if (e->RowIndex >= 0 && e->ColumnIndex >= 2 && e->ColumnIndex <= 3)
     {
+        // Получаем физический адрес из первой колонки
         String^ addrStr = dataGridViewRegisters->Rows[e->RowIndex]->Cells[0]->Value->ToString();
-        int spacePos = addrStr->IndexOf(L' ');
-        if (spacePos > 0)
+        if (addrStr->StartsWith(L"Reg"))
         {
-            int physicalAddress = Int32::Parse(addrStr->Substring(0, spacePos));
+            int physicalAddress = Int32::Parse(addrStr->Substring(3));
 
-            String^ newValueStr = dataGridViewRegisters->Rows[e->RowIndex]->Cells[2]->Value->ToString();
+            String^ newValueStr = dataGridViewRegisters->Rows[e->RowIndex]->Cells[e->ColumnIndex]->Value->ToString();
 
             try
             {
-                int newValue = Convert::ToInt32(newValueStr);
+                int32_t newIntValue;
+                float newFloatValue;
+                uint32_t newUintValue;
 
-                dataGridViewRegisters->Rows[e->RowIndex]->Cells[1]->Value = String::Format(L"0x{0:X4}", newValue & 0xFFFF);
+                if (e->ColumnIndex == 2)  // int32 колонка
+                {
+                    newIntValue = Convert::ToInt32(newValueStr);
+                    newUintValue = static_cast<uint32_t>(newIntValue);
+                    newFloatValue = ConvertToFloat(newUintValue);
+                    dataGridViewRegisters->Rows[e->RowIndex]->Cells[3]->Value = newFloatValue.ToString(L"F6");
+                }
+                else  // float колонка
+                {
+                    newFloatValue = Convert::ToSingle(newValueStr);
+newUintValue = FloatToRaw(newFloatValue);
+newIntValue = static_cast<int32_t>(newUintValue);
+                    dataGridViewRegisters->Rows[e->RowIndex]->Cells[2]->Value = newIntValue.ToString();
+                }
 
-                MarkRegisterAsChanged(physicalAddress, static_cast<uint32_t>(newValue), static_cast<float>(newValue));
+                dataGridViewRegisters->Rows[e->RowIndex]->Cells[1]->Value = String::Format(L"0x{0:X8}", newUintValue);
+
+                MarkRegisterAsChanged(physicalAddress, newUintValue, newFloatValue);
                 dataGridViewRegisters->Rows[e->RowIndex]->DefaultCellStyle->BackColor = Color::LightYellow;
                 UpdateParametersTable();
             }
@@ -1552,7 +2554,7 @@ void ModbusMasterForm::dataGridViewParameters_CellDoubleClick(Object^ sender, Da
             if (row->Cells[0]->Value != nullptr)
             {
                 String^ addrStr = row->Cells[0]->Value->ToString();
-                if (addrStr->Contains(String::Format(L"{0} (", physicalAddress)))
+                if (addrStr == String::Format(L"Reg{0}", physicalAddress))
                 {
                     dataGridViewRegisters->FirstDisplayedScrollingRowIndex = i;
                     dataGridViewRegisters->Rows[i]->Selected = true;
@@ -1561,12 +2563,26 @@ void ModbusMasterForm::dataGridViewParameters_CellDoubleClick(Object^ sender, Da
                 }
             }
         }
-
-        if (!isRegistersPanelExpanded)
-        {
-            ExpandRegistersPanel();
-        }
     }
+}
+
+// ============================================================================
+// Таймер автообновления
+// ============================================================================
+
+void ModbusMasterForm::OnTimerTick(Object^ sender, EventArgs^ e)
+{
+    AutoUpdateData();
+}
+
+void ModbusMasterForm::AutoUpdateData()
+{
+    if (!isAutoUpdating) return;
+    if (hSerial == INVALID_HANDLE_VALUE) return;
+    if (isPollingInProgress) return;
+    if (isRegisterCellEditing) return;
+
+    StartPollingCycle();
 }
 
 // ============================================================================
@@ -1575,11 +2591,6 @@ void ModbusMasterForm::dataGridViewParameters_CellDoubleClick(Object^ sender, Da
 
 void ModbusMasterForm::LogMessage(System::String^ message)
 {
-    if (textBoxLog->InvokeRequired)
-    {
-        textBoxLog->BeginInvoke(gcnew Action<String^>(this, &ModbusMasterForm::LogMessage), message);
-        return;
-    }
     textBoxLog->AppendText(DateTime::Now.ToString(L"HH:mm:ss") + L" - " + message + L"\r\n");
     textBoxLog->SelectionStart = textBoxLog->TextLength;
     textBoxLog->ScrollToCaret();

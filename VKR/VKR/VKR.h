@@ -12,7 +12,7 @@
 #include <limits>
 #include <iostream>
 
-// Заголовок для маршалинга в C++/CLI
+// Заголовок для маршалинга в C++/CLR
 #include <msclr\marshal_cppstd.h>
 
 using namespace System;
@@ -50,7 +50,14 @@ private:
     System::Windows::Forms::Label^ labelSlaveID;
     System::Windows::Forms::Label^ labelFoundDevices;
     System::Windows::Forms::TextBox^ textBoxScanResult;
-    System::Windows::Forms::ProgressBar^ progressBar;
+    System::Windows::Forms::Label^ labelModelCaption;
+    System::Windows::Forms::Label^ labelModelValue;
+    System::Windows::Forms::Label^ labelSerialCaption;
+    System::Windows::Forms::Label^ labelSerialValue;
+    System::Windows::Forms::Label^ labelTypeCaption;
+    System::Windows::Forms::Label^ labelTypeValue;
+    System::Windows::Forms::Label^ labelSpeedCaption;
+    System::Windows::Forms::Label^ labelSpeedValue;
 
     // Элементы управления для регистров
     System::Windows::Forms::DataGridView^ dataGridViewRegisters;
@@ -59,7 +66,6 @@ private:
     System::Windows::Forms::Button^ buttonRefreshRegisters;
     System::Windows::Forms::Button^ buttonStartAutoUpdate;
     System::Windows::Forms::Button^ buttonStopAutoUpdate;
-    System::Windows::Forms::Button^ buttonToggleRegisters;
     System::Windows::Forms::Button^ buttonSendChanges;
     System::Windows::Forms::Label^ labelAutoUpdateStatus;
     System::Windows::Forms::GroupBox^ groupBoxRegisters;
@@ -79,12 +85,12 @@ private:
     // Константы
     const int MIN_SLAVE_ID = 1;
     const int MAX_SLAVE_ID = 20;
-    const int MAX_REGISTER_ADDRESS = 500;   // 500 16-битных регистров
-    const int BATCH_SIZE = 20;             // Максимум регистров за запрос
-    const int MAX_WAIT_TICKS = 10;           // 8 * 50мс = 400мс таймаут
+    const int FIRST_REGISTER_ADDRESS = 0;      // Начальный адрес для сканирования
+    const int TOTAL_32BIT_VALUES = 500;        // Количество 32-битных значений
 
-    // Хранилище данных регистров (КЛЮЧ = физический адрес)
+    // Хранилище данных регистров (КЛЮЧ = физический адрес 16-битного регистра)
     Dictionary<int, Tuple<float, int32_t>^>^ allRegistersData;
+    Dictionary<int, System::UInt32>^ allRegistersRaw;
 
     // Данные для контролируемых параметров (фиксированные)
     List<String^>^ paramNames;
@@ -95,9 +101,24 @@ private:
     Dictionary<int, uint32_t>^ changedRegistersValues;
     Dictionary<int, float>^ changedRegistersFloats;
 
-    // Таймеры
-    System::Windows::Forms::Timer^ updateTimer;   // Для автообновления (4 сек)
-    System::Windows::Forms::Timer^ pollTimer;     // Для конечного автомата (50 мс)
+    // Таймер для автообновления
+ // Таймер для автообновления
+    System::Windows::Forms::Timer^ updateTimer;
+    System::Windows::Forms::Timer^ pollTimer;
+
+    enum class PollState
+    {
+        Idle,
+        SendBatch,
+        WaitBatch
+    };
+
+    PollState pollState;
+    int pollStartAddress;
+    int pollCurrentBatchSize;
+    DWORD pollBatchStartTick;
+    DWORD pollTotalBytesRead;
+    array<System::Byte>^ pollResponseBuffer;
 
     bool isAutoUpdating;
     bool isRegistersPanelExpanded;
@@ -108,27 +129,32 @@ private:
     // Флаги синхронизации
     bool isUpdatingTables;
     bool isPollingInProgress;
+    bool isRegisterCellEditing;
+    bool resumeAutoUpdateAfterEdit;
+    bool pendingUiRefreshAfterEdit;
+    bool pendingTablesRefresh;
     System::Object^ portLock;
-    DWORD pollStartTime;
+    System::Windows::Forms::GroupBox^ groupBoxLiveValues;
+    System::Windows::Forms::Label^ labelLiveDensityCaption;
+    System::Windows::Forms::Label^ labelLiveTemperatureCaption;
+    System::Windows::Forms::Label^ labelLiveUoutCaption;
 
-    // Конечный автомат опроса
-    enum class PollState { IDLE, SEND, WAIT, NEXT, COMPLETE };
-    PollState currentState;
-    int currentAddress;
-    int currentBatchSize;
-    int waitCounter;
-    int totalRegistersRead;
-
-    // Буферы (статическое выделение)
-    array<unsigned char>^ readBuffer;
-    array<unsigned char>^ writeBuffer;
-
+    System::Windows::Forms::TextBox^ textBoxLiveDensity;
+    System::Windows::Forms::TextBox^ textBoxLiveTemperature;
+    System::Windows::Forms::TextBox^ textBoxLiveUout;
     System::ComponentModel::Container^ components;
 
     void InitializeComponent();
     void InitializeCustomComponent();
     void InitializeParameters();
-    void InitializeTimers();
+    void InitializeTimer();
+    void InitializeRegistersGrid();
+    void InitializeParametersGrid();
+    void StartPollingCycle();
+    void SendPollBatch();
+    void ReadPollBatch();
+    void FinishPollingCycle();
+    void OnPollTimerTick(Object^ sender, EventArgs^ e);
     void RefreshPorts();
     void ConnectToPort();
     bool ConfigurePort();
@@ -138,38 +164,37 @@ private:
     bool CheckCRC(const uint8_t* response, size_t length);
     void ScanForDevices();
     void RefreshRegistersData();
+    void ScanAllRegisters();
     void WriteRegisters();
     void UpdateRegistersData();
     void UpdateFullRegistersTable();
     void UpdateParametersTable();
     void CollapseRegistersPanel();
     void ExpandRegistersPanel();
-    void UpdateProgress(int value);
     void LogMessage(System::String^ message);
     void LogMessage(const std::wstring& message);
     System::String^ StringToWString(const std::string& str);
-
-    // Обработчики таймеров
-    void OnUpdateTimerTick(Object^ sender, EventArgs^ e);
-    void OnPollTimerTick(Object^ sender, EventArgs^ e);
-
-    // Методы конечного автомата
-    void SendRequest();
-    void CheckResponse();
-    void MoveToNext();
-    void CompletePolling();
-
+    System::String^ BytesToHex(const uint8_t* data, int length);
+    void OnTimerTick(Object^ sender, EventArgs^ e);
+    void AutoUpdateData();
     void MarkRegisterAsChanged(int registerAddress, uint32_t newValue, float newFloatValue);
     bool IsRegisterChanged(int registerAddress);
     void ClearChangedRegisters();
-
-    // Вспомогательные методы (быстрые преобразования)
-    float BytesToFloat(array<unsigned char>^ bytes, int offset);
-    void FloatToBytes(float value, array<unsigned char>^ buffer, int offset);
-    uint16_t BytesToUInt16(array<unsigned char>^ bytes, int offset);
-    void UInt16ToBytes(uint16_t value, array<unsigned char>^ buffer, int offset);
+    // Вспомогательные методы
+    float ConvertToFloat(uint32_t value);
+    int32_t ConvertToInt32(uint32_t value);
+    uint32_t FloatToRaw(float value);
+    bool ReadLogicalReg32(int logicalReg, System::UInt32% rawValue, System::Int32% intValue, float% floatValue);
+    void UpdateDeviceInfoLabels();
+    void ClearDeviceInfoLabels();
+    float ConvertToFloatSwappedWords(uint32_t value);
+    bool ReadLogicalReg32WithFunction(int logicalReg, System::Byte functionCode,
+        System::UInt32% rawValue, System::Int32% intValue, float% floatValue);
+    void DebugTemperatureProbe();
 
     // Обработчики событий
+    void InitializeLiveValuesPanel();
+    void UpdateLiveValuesPanel();
     void Form1_Load(System::Object^ sender, System::EventArgs^ e);
     void buttonRefresh_Click(System::Object^ sender, System::EventArgs^ e);
     void buttonConnect_Click(System::Object^ sender, System::EventArgs^ e);
@@ -180,8 +205,11 @@ private:
     void buttonRefreshRegisters_Click(System::Object^ sender, EventArgs^ e);
     void buttonStartAutoUpdate_Click(System::Object^ sender, EventArgs^ e);
     void buttonStopAutoUpdate_Click(System::Object^ sender, EventArgs^ e);
-    void buttonToggleRegisters_Click(System::Object^ sender, EventArgs^ e);
     void buttonSendChanges_Click(System::Object^ sender, EventArgs^ e);
     void dataGridViewRegisters_CellValueChanged(Object^ sender, DataGridViewCellEventArgs^ e);
     void dataGridViewParameters_CellDoubleClick(Object^ sender, DataGridViewCellEventArgs^ e);
+    void dataGridViewRegisters_CellBeginEdit(System::Object^ sender, System::Windows::Forms::DataGridViewCellCancelEventArgs^ e);
+    void dataGridViewRegisters_CellEndEdit(System::Object^ sender, System::Windows::Forms::DataGridViewCellEventArgs^ e);
+    void PauseAutoUpdateForEditing();
+    void ResumeAutoUpdateAfterEditing();
 };
